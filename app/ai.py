@@ -137,8 +137,10 @@ Schema:
         return clean
 
     @staticmethod
-    def _extract_json(raw: str) -> dict:
-        raw = raw.strip()
+    def _extract_json(raw) -> dict:
+        if isinstance(raw, dict):
+            return raw
+        raw = str(raw or "").strip()
         raw = re.sub(r"^\x60\x60\x60(?:json)?\s*", "", raw, flags=re.I)
         raw = re.sub(r"\s*\x60\x60\x60$", "", raw)
         try:
