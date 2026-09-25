@@ -28,7 +28,6 @@ class CloudflareAI:
             return self.account_id
         if not self.token:
             raise AIError("CLOUDFLARE_API_TOKEN is not configured.")
-
         response = await self._client.get(
             "https://api.cloudflare.com/client/v4/accounts",
             headers={"Authorization": f"Bearer {self.token}"},
@@ -38,9 +37,7 @@ class CloudflareAI:
         if response.is_success and accounts:
             self.account_id = accounts[0]["id"]
             return self.account_id
-        raise AIError(
-            "Cloudflare account ID could not be detected. Add CLOUDFLARE_ACCOUNT_ID as a GitHub secret."
-        )
+        raise AIError("Cloudflare account could not be detected.")
 
     async def _run(self, model: str, payload: dict, raw_audio: bytes | None = None) -> dict:
         account_id = await self._resolve_account_id()
@@ -69,102 +66,58 @@ class CloudflareAI:
             raise AIError("No transcription was returned.")
         return text.strip()
 
-    async def parse_tasks(self, text: str, timezone_name: str, language_code: str) -> list[dict]:
-        try:
-            tz = ZoneInfo(timezone_name)
-        except Exception:
-            tz = ZoneInfo(settings.default_timezone)
-            timezone_name = settings.default_timezone
+    async def classify_intent(self, text: str, timezone_name: str = "Asia/Tehran") -> str:
+        now = datetime.now(ZoneInfo(timezone_name))
+        system = """تو مسیریاب یک دستیار برنامه‌ریزی فارسی هستی.
+فقط یکی از این intentها را برگردان:
+plan = کاربر درباره کارهایی که باید انجام بدهد، برنامه آینده، ددلاین، یادآوری یا برنامه‌ریزی حرف می‌زند
+report = کاربر درباره کاری که انجام داده یا تمام کرده گزارش می‌دهد
+today = می‌پرسد امروز چه کارهایی دارد
+upcoming = می‌پرسد کارهای بعدی یا آینده‌اش چیست
+reports = گزارش‌های قبلی یا کارهای انجام‌شده‌اش را می‌خواهد ببیند
+unknown = هیچ‌کدام روشن نیست
 
-        now = datetime.now(tz)
-        system = """You are the planning engine for an AI task manager.
-Turn a brain dump into actionable tasks. The user can write Persian, English, German, or mixed text.
-
-Rules:
-1. Never invent a hard deadline. due_at is only allowed when the user explicitly gave a date, time, or clear relative deadline.
-2. AI may suggest scheduled_at to make the plan feasible. A suggested schedule is not a deadline.
-3. Preserve dependencies by scheduling prerequisites before dependent work.
-4. Keep task titles short and in the user's language.
-5. Use ISO 8601 date-times with timezone offsets.
-6. If a date is given without a time, choose a reasonable scheduled time but keep due_at at 23:59 local time.
-7. reminder_at should normally be before scheduled_at or due_at, never after it.
-8. priority must be low, medium, high, or urgent.
-9. Return only valid JSON, no markdown.
-
-Schema:
-{"tasks":[{"title":"...","notes":"...","project":"...","priority":"medium","estimated_minutes":30,"due_at":null,"due_source":"explicit|none","scheduled_at":null,"reminder_at":null}]}"""
-
-        user = (
-            f"Current local datetime: {now.isoformat()}\n"
-            f"Timezone: {timezone_name}\n"
-            f"Telegram language hint: {language_code}\n"
-            f"Brain dump:\n{text}"
-        )
+نکته‌های مهم:
+- جمله‌هایی مثل «رباته رو ساختم کامل»، «امروز فلان باگ رو حل کردم»، «جلسه رو انجام دادم» حتما report هستند.
+- جمله‌هایی مثل «یه ربات باید بسازم»، «فردا باید...» plan هستند.
+- فقط JSON معتبر برگردان.
+Schema: {"intent":"plan|report|today|upcoming|reports|unknown"}"""
         result = await self._run(
             settings.cloudflare_llm_model,
             {
                 "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {"role": "user", "content": f"الان: {now.isoformat()}\nپیام کاربر:\n{text}"},
                 ],
-                "temperature": 0.1,
-                "max_tokens": 1800,
+                "temperature": 0,
+                "max_tokens": 80,
             },
         )
-        raw = result.get("response") or result.get("text") or ""
-        obj = self._extract_json(raw)
-        tasks = obj.get("tasks") if isinstance(obj, dict) else None
-        if not isinstance(tasks, list):
-            raise AIError("The planning model returned an invalid task list.")
-        clean = []
-        for item in tasks[:30]:
-            if not isinstance(item, dict) or not str(item.get("title", "")).strip():
-                continue
-            due_source = "explicit" if item.get("due_source") == "explicit" and item.get("due_at") else "none"
-            clean.append(
-                {
-                    "title": str(item.get("title", "")).strip()[:500],
-                    "notes": str(item.get("notes") or "").strip(),
-                    "project": str(item.get("project") or "").strip()[:200],
-                    "priority": item.get("priority") if item.get("priority") in {"low", "medium", "high", "urgent"} else "medium",
-                    "estimated_minutes": self._int(item.get("estimated_minutes"), 30, 5, 1440),
-                    "due_at": self._normalize_iso(item.get("due_at"), timezone_name) if due_source == "explicit" else None,
-                    "due_source": due_source,
-                    "scheduled_at": self._normalize_iso(item.get("scheduled_at"), timezone_name),
-                    "reminder_at": self._normalize_iso(item.get("reminder_at"), timezone_name),
-                }
-            )
-        return clean
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        intent = str(obj.get("intent") or "unknown")
+        return intent if intent in {"plan", "report", "today", "upcoming", "reports", "unknown"} else "unknown"
 
-    async def parse_report(self, text: str, timezone_name: str, language_code: str) -> dict:
+    async def parse_tasks(self, text: str, timezone_name: str, language_code: str = "fa") -> list[dict]:
         try:
             tz = ZoneInfo(timezone_name)
         except Exception:
-            tz = ZoneInfo(settings.default_timezone)
-            timezone_name = settings.default_timezone
-
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
         now = datetime.now(tz)
-        system = """You structure a work report for a simple work-log app.
-The user may write Persian, English, German, or mixed text.
+        system = """تو مغز برنامه‌ریز یک دستیار کاملاً فارسی هستی.
+متن کاربر را به کارهای واقعی و اجرایی تبدیل کن.
 
-Rules:
-1. Summarize only what the user says they did. Never invent accomplishments.
-2. title should be short and concrete.
-3. project is optional. Leave it empty if unclear.
-4. category should be a short general label such as development, meeting, support, design, research, sales, admin, operations, or work.
-5. duration_minutes must be null unless the user explicitly states a duration or a start/end time that makes duration directly calculable.
-6. work_date should represent the day the work happened. Resolve today/yesterday using the supplied local time. If no day is mentioned, use the current local date.
-7. Return valid JSON only.
-
+قوانین:
+1. تمام title، notes و project باید فارسی باشند. هیچ واژه انگلیسی تولید نکن مگر اسم خاصی که خود کاربر دقیقاً انگلیسی گفته باشد.
+2. از یک جمله مبهم چند کار ساختگی نساز. فقط چیزهایی را بساز که واقعاً از حرف کاربر درمی‌آید.
+3. اگر کاربر فقط گفته «یه ربات باید بسازم فیچراشو درارم و اینا»، نهایتاً 1 یا 2 کار معنادار بساز، نه چهار کار خیالی.
+4. due_at فقط وقتی مجاز است که خود کاربر تاریخ یا زمان یا مهلت مشخص گفته باشد.
+5. scheduled_at پیشنهاد توست و باید منطقی باشد؛ اگر زمان مشخصی از کاربر نداری، لازم نیست ساعت دقیق الکی بسازی و می‌تواند null باشد.
+6. priority فقط low, medium, high, urgent.
+7. خروجی فقط JSON معتبر.
 Schema:
-{"report":{"title":"...","summary":"...","project":"","category":"work","duration_minutes":null,"work_date":"YYYY-MM-DD"}}"""
-
-        user = (
-            f"Current local datetime: {now.isoformat()}\n"
-            f"Timezone: {timezone_name}\n"
-            f"Telegram language hint: {language_code}\n"
-            f"Work report:\n{text}"
-        )
+{"tasks":[{"title":"فارسی","notes":"فارسی","project":"فارسی یا خالی","priority":"medium","estimated_minutes":30,"due_at":null,"due_source":"explicit|none","scheduled_at":null,"reminder_at":null}]}"""
+        user = f"الان به وقت ایران: {now.isoformat()}\nمتن کاربر:\n{text}"
         result = await self._run(
             settings.cloudflare_llm_model,
             {
@@ -172,20 +125,135 @@ Schema:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.1,
-                "max_tokens": 900,
+                "temperature": 0.05,
+                "max_tokens": 1600,
             },
         )
         raw = result.get("response") or result.get("text") or result
         obj = self._extract_json(raw)
+        tasks = obj.get("tasks") if isinstance(obj, dict) else None
+        if not isinstance(tasks, list):
+            raise AIError("Invalid task list.")
+        return self._clean_tasks(tasks, timezone_name)
+
+    async def revise_tasks(self, tasks: list[dict], instruction: str, timezone_name: str) -> list[dict]:
+        now = datetime.now(ZoneInfo(timezone_name))
+        system = """تو ویرایشگر برنامه فارسی هستی.
+یک برنامه موجود و درخواست اصلاح کاربر را می‌گیری و فقط همان تغییر خواسته‌شده را اعمال می‌کنی.
+همه متن‌های خروجی فارسی باشند. چیزی را بی‌دلیل اضافه نکن.
+due_at فقط اگر کاربر صریحاً مهلت داده باشد.
+خروجی فقط JSON معتبر با همان Schema قبلی."""
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps({
+                        "now": now.isoformat(),
+                        "timezone": timezone_name,
+                        "current_tasks": tasks,
+                        "edit_request": instruction,
+                    }, ensure_ascii=False)},
+                ],
+                "temperature": 0.05,
+                "max_tokens": 1600,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        tasks_out = obj.get("tasks") if isinstance(obj, dict) else None
+        if not isinstance(tasks_out, list):
+            raise AIError("Invalid revised task list.")
+        return self._clean_tasks(tasks_out, timezone_name)
+
+    async def parse_report(self, text: str, timezone_name: str, language_code: str = "fa") -> dict:
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        now = datetime.now(tz)
+        system = """تو گزارش کار فارسی را ساختاریافته می‌کنی.
+فقط چیزی را ثبت کن که کاربر واقعاً گفته انجام داده است.
+
+قوانین:
+1. title، summary، project و category باید فارسی باشند. هیچ ترجمه یا عنوان انگلیسی نساز.
+2. اگر کاربر گفت «رباته رو ساختم کامل»، عنوان باید چیزی مثل «ساخت کامل ربات» باشد، نه ترجمه یا حدس نامربوط.
+3. duration_minutes فقط اگر کاربر زمان را گفته باشد.
+4. work_date اگر تاریخ نگفته، امروز به وقت ایران است.
+5. فقط JSON معتبر برگردان.
+Schema:
+{"report":{"title":"فارسی","summary":"فارسی","project":"","category":"کار","duration_minutes":null,"work_date":"YYYY-MM-DD"}}"""
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"الان به وقت ایران: {now.isoformat()}\nگزارش کاربر:\n{text}"},
+                ],
+                "temperature": 0.05,
+                "max_tokens": 700,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
         item = obj.get("report") if isinstance(obj, dict) else None
         if not isinstance(item, dict):
-            raise AIError("The planning model returned an invalid report.")
+            raise AIError("Invalid report.")
+        return self._clean_report(item, text, now)
 
-        title = str(item.get("title") or text).strip()[:500]
-        summary = str(item.get("summary") or text).strip()
+    async def revise_report(self, report: dict, instruction: str, timezone_name: str) -> dict:
+        now = datetime.now(ZoneInfo(timezone_name))
+        system = """تو ویرایشگر گزارش کار فارسی هستی.
+گزارش فعلی و درخواست اصلاح کاربر را می‌گیری و فقط همان اصلاح را انجام می‌دهی.
+هیچ چیز ساختگی اضافه نکن. همه متن‌ها فارسی باشند.
+فقط JSON معتبر برگردان.
+Schema:
+{"report":{"title":"فارسی","summary":"فارسی","project":"","category":"کار","duration_minutes":null,"work_date":"YYYY-MM-DD"}}"""
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps({
+                        "now": now.isoformat(),
+                        "timezone": timezone_name,
+                        "current_report": report,
+                        "edit_request": instruction,
+                    }, ensure_ascii=False)},
+                ],
+                "temperature": 0.05,
+                "max_tokens": 700,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        item = obj.get("report") if isinstance(obj, dict) else None
+        if not isinstance(item, dict):
+            raise AIError("Invalid revised report.")
+        return self._clean_report(item, report.get("summary") or report.get("title") or "", now)
+
+    def _clean_tasks(self, tasks: list[dict], timezone_name: str) -> list[dict]:
+        clean = []
+        for item in tasks[:20]:
+            if not isinstance(item, dict) or not str(item.get("title", "")).strip():
+                continue
+            due_source = "explicit" if item.get("due_source") == "explicit" and item.get("due_at") else "none"
+            clean.append({
+                "title": str(item.get("title", "")).strip()[:500],
+                "notes": str(item.get("notes") or "").strip(),
+                "project": str(item.get("project") or "").strip()[:200],
+                "priority": item.get("priority") if item.get("priority") in {"low", "medium", "high", "urgent"} else "medium",
+                "estimated_minutes": self._int(item.get("estimated_minutes"), 30, 5, 1440),
+                "due_at": self._normalize_iso(item.get("due_at"), timezone_name) if due_source == "explicit" else None,
+                "due_source": due_source,
+                "scheduled_at": self._normalize_iso(item.get("scheduled_at"), timezone_name),
+                "reminder_at": self._normalize_iso(item.get("reminder_at"), timezone_name),
+            })
+        return clean
+
+    def _clean_report(self, item: dict, fallback_text: str, now: datetime) -> dict:
+        title = str(item.get("title") or fallback_text or "گزارش کار").strip()[:500]
+        summary = str(item.get("summary") or fallback_text or "").strip()
         project = str(item.get("project") or "").strip()[:200]
-        category = str(item.get("category") or "work").strip()[:100] or "work"
+        category = str(item.get("category") or "کار").strip()[:100] or "کار"
         duration = item.get("duration_minutes")
         try:
             duration = int(duration) if duration is not None else None
@@ -193,13 +261,11 @@ Schema:
                 duration = None
         except Exception:
             duration = None
-
         work_date = str(item.get("work_date") or now.date().isoformat())[:10]
         try:
             datetime.strptime(work_date, "%Y-%m-%d")
         except Exception:
             work_date = now.date().isoformat()
-
         return {
             "title": title,
             "summary": summary,
