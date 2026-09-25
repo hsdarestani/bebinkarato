@@ -441,11 +441,20 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if _get_mode(user.id) == "reports":
         msg = await update.effective_message.reply_text("🎙️ …")
+        audio = None
+        transcript = ""
         try:
             tg_file = await context.bot.get_file(voice.file_id)
             audio = bytes(await tg_file.download_as_bytearray())
-            transcript = await ai.transcribe(audio)
-            await msg.delete()
+            try:
+                transcript = await ai.transcribe(audio)
+            except Exception as exc:
+                print(f"Voice transcription fallback: {exc}")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
             attachment = {
                 "file_id": voice.file_id,
                 "unique_id": voice.file_unique_id,
@@ -461,9 +470,13 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 fallback_title="Voice report", attachment=attachment
             )
         except Exception as exc:
-            print(f"Voice report error: {exc}")
+            print(f"Voice report save error: {exc}")
             try:
-                await msg.edit_text(_t("ai_error", _lang(user)))
+                await msg.edit_text(
+                    "نتونستم این ویس رو ذخیره کنم. لطفاً دوباره بفرست."
+                    if _lang(user) == "fa"
+                    else "I couldn't save this voice report. Please send it again."
+                )
             except Exception:
                 pass
         return
