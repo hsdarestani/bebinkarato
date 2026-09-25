@@ -68,21 +68,27 @@ jobs:
             docker compose up -d --build --remove-orphans
 
             if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-              ufw allow 8080/tcp >/dev/null
+              ufw allow 80/tcp >/dev/null
+              ufw allow 443/tcp >/dev/null
             fi
             if command -v iptables >/dev/null 2>&1; then
-              iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
+              iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+              iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 443 -j ACCEPT
             fi
 
             docker compose exec -T app python -c "import asyncio; from app.bot import ai; asyncio.run(ai._resolve_account_id())"
             docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_tasks('Tomorrow at 10 call the dentist', 'Europe/Berlin', 'en')); assert r and r[0].get('title')"
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_report('Today I fixed the payment bug for two hours', 'Europe/Berlin', 'en')); assert r.get('title') and r.get('work_date')"
 
-            for i in $(seq 1 20); do
-              if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+            for i in $(seq 1 30); do
+              if docker compose exec -T app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1 \
+                 && curl -fsS https://5-161-144-101.sslip.io/health >/dev/null 2>&1 \
+                 && curl -fsS -u "admin:$ADMIN_PASSWORD" https://5-161-144-101.sslip.io/admin >/dev/null 2>&1; then
                 exit 0
               fi
               sleep 3
             done
 
-            docker compose logs --tail=120
+            docker compose ps
+            docker compose logs --tail=160
             exit 1
