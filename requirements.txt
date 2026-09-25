@@ -1,0 +1,8 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-telegram-bot>=21.10,<23
+SQLAlchemy>=2.0,<3
+httpx>=0.28,<1
+pydantic-settings>=2.7,<3
+python-multipart>=0.0.20,<1
+tzdata>=2025.1
