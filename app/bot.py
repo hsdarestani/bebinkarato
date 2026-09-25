@@ -547,6 +547,30 @@ async def media_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not attachment:
         return
 
+    current_mode = _get_mode(user.id)
+    if current_mode == "reports" and not caption:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        with SessionLocal() as db:
+            recent = db.scalar(
+                select(WorkReport)
+                .where(WorkReport.user_id == user.id, WorkReport.created_at >= cutoff)
+                .order_by(WorkReport.created_at.desc())
+            )
+            recent_id = recent.id if recent else None
+            recent_title = recent.title if recent else None
+
+        if recent_id:
+            await _save_attachment(context, report_id=recent_id, **attachment)
+            await update.effective_message.reply_text(
+                (
+                    f"📎 فایل به گزارش «{recent_title}» اضافه شد."
+                    if _lang(user) == "fa"
+                    else f"📎 File attached to “{recent_title}”."
+                ),
+                reply_markup=_keyboard(_lang(user)),
+            )
+            return
+
     _set_mode(user.id, "reports")
     await _create_report(
         update,
