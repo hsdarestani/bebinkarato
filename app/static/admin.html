@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bebin Karato Admin</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717;background:#f5f5f3}
+*{box-sizing:border-box}body{margin:0}.top{position:sticky;top:0;z-index:10;background:rgba(245,245,243,.94);backdrop-filter:blur(14px);border-bottom:1px solid #ddd;padding:18px 22px}
+.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.brand{font-size:20px;font-weight:800;margin-right:auto}.pill{background:#fff;border:1px solid #ddd;border-radius:999px;padding:7px 11px;font-size:13px}.filters{padding-top:14px}
+input,select{height:38px;border:1px solid #d2d2ce;border-radius:10px;background:#fff;padding:0 11px;font:inherit}input{min-width:260px}
+.board{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:14px;padding:18px;overflow-x:auto;align-items:start}.column{background:#eaeae6;border:1px solid #d8d8d2;border-radius:16px;padding:10px;min-height:70vh}
+.column h2{font-size:14px;margin:5px 4px 12px;display:flex;justify-content:space-between}.count{font-weight:500;color:#777}.cards{min-height:60vh}.card{background:#fff;border:1px solid #ddd;border-radius:13px;padding:12px;margin:0 0 9px;box-shadow:0 1px 2px rgba(0,0,0,.03);cursor:grab}.card.dragging{opacity:.45}
+.title{font-weight:700;line-height:1.35}.meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.tag{font-size:11px;border-radius:999px;padding:4px 7px;background:#f1f1ef}.urgent{background:#ffe0e0}.high{background:#fff0d6}.user{font-size:12px;color:#555;margin-top:8px}.dates{font-size:11px;color:#777;margin-top:8px;line-height:1.5}.empty{padding:20px;text-align:center;color:#888;font-size:13px}.drop{outline:2px dashed #999;outline-offset:-4px}
+@media(max-width:900px){.board{grid-template-columns:repeat(4,280px)}input{min-width:180px}.top{padding:14px}}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="row">
+    <div class="brand">Bebin Karato · Admin</div>
+    <div class="pill" id="users">0 users</div>
+    <div class="pill" id="tasks">0 tasks</div>
+    <div class="pill" id="doing">0 doing</div>
+  </div>
+  <div class="row filters">
+    <input id="search" placeholder="Search task, project or user">
+    <select id="source"><option value="">All sources</option><option value="text">Text</option><option value="voice">Voice</option></select>
+    <select id="plan"><option value="">All plans</option><option value="free">Free</option><option value="pro">Pro</option></select>
+  </div>
+</div>
+<div class="board" id="board"></div>
+<script>
+const columns=[["draft","Draft"],["todo","To do"],["doing","Doing"],["done","Done"]];
+let data={tasks:[],stats:{}};
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=v=>v?new Date(v).toLocaleString():"";
+function userLabel(u){return (u.name||"").trim()||(u.username?"@"+u.username:String(u.telegram_id||"Unknown"))}
+async function load(){const r=await fetch("/admin/api/board",{cache:"no-store"});if(!r.ok)throw new Error(await r.text());data=await r.json();render()}
+function card(t){
+ const p=esc(t.priority),u=esc(userLabel(t.user));
+ const project=t.project?'<span class="tag">'+esc(t.project)+'</span>':"";
+ const due=t.due_at?'<div>Deadline: '+esc(fmt(t.due_at))+(t.due_source==="explicit"?" · user":"")+'</div>':"";
+ const scheduled=t.scheduled_at?'<div>Scheduled: '+esc(fmt(t.scheduled_at))+'</div>':"";
+ return '<div class="card" draggable="true" data-id="'+t.id+'"><div class="title">'+esc(t.title)+'</div><div class="meta"><span class="tag '+p+'">'+p+'</span>'+project+'<span class="tag">'+esc(t.source)+'</span><span class="tag">'+esc(t.estimated_minutes)+' min</span></div><div class="user">'+u+' · '+esc(t.user.plan||"")+'</div><div class="dates">'+scheduled+due+'</div></div>';
+}
+function filtered(){
+ const q=document.getElementById("search").value.toLowerCase().trim(),source=document.getElementById("source").value,plan=document.getElementById("plan").value;
+ return data.tasks.filter(t=>(!source||t.source===source)&&(!plan||t.user.plan===plan)&&(!q||[t.title,t.project,userLabel(t.user),t.user.username].join(" ").toLowerCase().includes(q)));
+}
+function render(){
+ document.getElementById("users").textContent=(data.stats.users||0)+" users";
+ document.getElementById("tasks").textContent=(data.stats.tasks||0)+" tasks";
+ document.getElementById("doing").textContent=(data.stats.doing||0)+" doing";
+ const tasks=filtered(),b=document.getElementById("board");
+ b.innerHTML=columns.map(c=>{const items=tasks.filter(t=>t.status===c[0]);return '<section class="column" data-status="'+c[0]+'"><h2><span>'+c[1]+'</span><span class="count">'+items.length+'</span></h2><div class="cards">'+(items.map(card).join("")||'<div class="empty">No tasks</div>')+'</div></section>'}).join("");
+ bindDnD();
+}
+function bindDnD(){
+ document.querySelectorAll(".card").forEach(el=>{
+   el.addEventListener("dragstart",()=>el.classList.add("dragging"));
+   el.addEventListener("dragend",()=>el.classList.remove("dragging"));
+ });
+ document.querySelectorAll(".column").forEach(col=>{
+   col.addEventListener("dragover",e=>{e.preventDefault();col.classList.add("drop")});
+   col.addEventListener("dragleave",()=>col.classList.remove("drop"));
+   col.addEventListener("drop",async e=>{
+     e.preventDefault();col.classList.remove("drop");
+     const el=document.querySelector(".dragging");if(!el)return;
+     const id=Number(el.dataset.id),status=col.dataset.status;
+     const task=data.tasks.find(x=>x.id===id);if(!task||task.status===status)return;
+     const old=task.status;task.status=status;render();
+     const r=await fetch("/admin/api/tasks/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:status})});
+     if(!r.ok){task.status=old;render();alert("Update failed")}
+   });
+ });
+}
+["search","source","plan"].forEach(id=>document.getElementById(id).addEventListener(id==="search"?"input":"change",render));
+load().catch(e=>{document.getElementById("board").innerHTML='<div class="empty">'+esc(e.message)+'</div>'});
+setInterval(()=>load().catch(()=>{}),30000);
+</script>
+</body>
+</html>
