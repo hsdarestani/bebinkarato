@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bebin Karato Admin</title>
+<title>پنل ببین کاراتو</title>
 <style>
 :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717;background:#f5f5f3}
 *{box-sizing:border-box}body{margin:0}.top{position:sticky;top:0;z-index:10;background:rgba(245,245,243,.95);backdrop-filter:blur(14px);border-bottom:1px solid #ddd;padding:16px 20px}
-.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.brand{font-size:20px;font-weight:800;margin-right:auto}.pill,.tab{background:#fff;border:1px solid #ddd;border-radius:999px;padding:7px 11px;font-size:13px}.tab{cursor:pointer}.tab.active{background:#171717;color:#fff;border-color:#171717}.tabs{margin-top:12px}.filters{padding-top:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.brand{font-size:20px;font-weight:800;margin-left:auto}.pill,.tab{background:#fff;border:1px solid #ddd;border-radius:999px;padding:7px 11px;font-size:13px}.tab{cursor:pointer}.tab.active{background:#171717;color:#fff;border-color:#171717}.tabs{margin-top:12px}.filters{padding-top:12px}
 input,select{height:38px;border:1px solid #d2d2ce;border-radius:10px;background:#fff;padding:0 11px;font:inherit}input{min-width:260px}
 .board{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:14px;padding:18px;overflow-x:auto;align-items:start}.column{background:#eaeae6;border:1px solid #d8d8d2;border-radius:16px;padding:10px;min-height:68vh}
 .column h2{font-size:14px;margin:5px 4px 12px;display:flex;justify-content:space-between}.count{font-weight:500;color:#777}.cards{min-height:58vh}
@@ -20,38 +20,38 @@ input,select{height:38px;border:1px solid #d2d2ce;border-radius:10px;background:
 <body>
 <div class="top">
   <div class="row">
-    <div class="brand">Bebin Karato · Admin</div>
-    <div class="pill" id="users">0 users</div>
-    <div class="pill" id="tasks">0 tasks</div>
-    <div class="pill" id="reportsCount">0 reports</div>
+    <div class="brand">ببین کاراتو · پنل ادمین</div>
+    <div class="pill" id="users">۰ کاربر</div>
+    <div class="pill" id="tasks">۰ کار</div>
+    <div class="pill" id="reportsCount">۰ گزارش</div>
   </div>
   <div class="row tabs">
-    <button class="tab active" data-view="tasks">Tasks</button>
-    <button class="tab" data-view="reports">Work reports</button>
+    <button class="tab active" data-view="tasks">کارها</button>
+    <button class="tab" data-view="reports">گزارش کارها</button>
   </div>
   <div class="row filters">
-    <input id="search" placeholder="Search task, report, project or user">
+    <input id="search" placeholder="بگرد تو کارها، گزارش‌ها، پروژه‌ها یا کاربرا...">
     <select id="source">
-      <option value="">All sources</option>
-      <option value="text">Text</option>
-      <option value="voice">Voice</option>
-      <option value="photo">Photo</option>
-      <option value="document">Document</option>
-      <option value="video">Video</option>
-      <option value="audio">Audio</option>
-      <option value="task_done">Completed task</option>
+      <option value="">همه ورودی‌ها</option>
+      <option value="text">متن</option>
+      <option value="voice">ویس</option>
+      <option value="photo">عکس</option>
+      <option value="document">فایل</option>
+      <option value="video">ویدیو</option>
+      <option value="audio">صوت</option>
+      <option value="task_done">کار انجام‌شده</option>
     </select>
-    <select id="plan"><option value="">All plans</option><option value="free">Free</option><option value="pro">Pro</option></select>
+    <select id="plan"><option value="">همه پلن‌ها</option><option value="free">رایگان</option><option value="pro">ویژه</option></select>
   </div>
 </div>
 <div class="board" id="taskBoard"></div>
 <div class="reports hidden" id="reportGrid"></div>
 <script>
-const columns=[["draft","Draft"],["todo","To do"],["doing","Doing"],["done","Done"]];
+const columns=[["draft","پیش‌نویس"],["todo","باید انجام بشه"],["doing","داره انجام میشه"],["done","انجام شده"]];
 let data={tasks:[],reports:[],stats:{}},view="tasks";
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=v=>v?new Date(v).toLocaleString():"";
-function userLabel(u){return (u.name||"").trim()||(u.username?"@"+u.username:String(u.telegram_id||"Unknown"))}
+function userLabel(u){return (u.name||"").trim()||(u.username?"@"+u.username:String(u.telegram_id||"نامشخص"))}
 async function load(){const r=await fetch("/admin/api/board",{cache:"no-store"});if(!r.ok)throw new Error(await r.text());data=await r.json();render()}
 function matchCommon(item){
  const q=document.getElementById("search").value.toLowerCase().trim(),source=document.getElementById("source").value,plan=document.getElementById("plan").value;
@@ -60,29 +60,29 @@ function matchCommon(item){
 }
 function taskCard(t){
  const p=esc(t.priority),u=esc(userLabel(t.user));const project=t.project?'<span class="tag">'+esc(t.project)+'</span>':"";
- const due=t.due_at?'<div>Deadline: '+esc(fmt(t.due_at))+(t.due_source==="explicit"?" · user":"")+'</div>':"";
- const scheduled=t.scheduled_at?'<div>Scheduled: '+esc(fmt(t.scheduled_at))+'</div>':"";
+ const due=t.due_at?'<div>ددلاین: '+esc(fmt(t.due_at))+(t.due_source==="explicit"?" · ثبت‌شده توسط کاربر":"")+'</div>':"";
+ const scheduled=t.scheduled_at?'<div>زمان پیشنهادی: '+esc(fmt(t.scheduled_at))+'</div>':"";
  return '<div class="card" draggable="true" data-id="'+t.id+'"><div class="title">'+esc(t.title)+'</div><div class="meta"><span class="tag '+p+'">'+p+'</span>'+project+'<span class="tag">'+esc(t.source)+'</span><span class="tag">'+esc(t.estimated_minutes)+' min</span></div><div class="user">'+u+' · '+esc(t.user.plan||"")+'</div><div class="dates">'+scheduled+due+'</div></div>';
 }
 function reportCard(r){
- const tags=[r.project,r.category,r.source,r.duration_minutes?r.duration_minutes+" min":null].filter(Boolean).map(v=>'<span class="tag">'+esc(v)+'</span>').join("");
+ const tags=[r.project,r.category,r.source,r.duration_minutes?r.duration_minutes+" دقیقه":null].filter(Boolean).map(v=>'<span class="tag">'+esc(v)+'</span>').join("");
  const files=(r.attachments||[]).map(a=>a.url?'<a class="file" href="'+esc(a.url)+'" target="_blank">📎 '+esc(a.file_name||a.file_type)+'</a>':'<span class="file">📎 '+esc(a.file_name||a.file_type)+'</span>').join("");
- return '<article class="report"><div class="title">'+esc(r.title)+'</div>'+(r.summary?'<div class="summary">'+esc(r.summary)+'</div>':'')+'<div class="meta">'+tags+'</div><div class="user">'+esc(userLabel(r.user))+' · '+esc(r.user.plan||"")+'</div><div class="dates">Work date: '+esc(r.work_date)+'<br>Submitted: '+esc(fmt(r.created_at))+'</div>'+(files?'<div class="attachments">'+files+'</div>':'')+'</article>';
+ return '<article class="report"><div class="title">'+esc(r.title)+'</div>'+(r.summary?'<div class="summary">'+esc(r.summary)+'</div>':'')+'<div class="meta">'+tags+'</div><div class="user">'+esc(userLabel(r.user))+' · '+esc(r.user.plan||"")+'</div><div class="dates">تاریخ کار: '+esc(r.work_date)+'<br>زمان ثبت: '+esc(fmt(r.created_at))+'</div>'+(files?'<div class="attachments">'+files+'</div>':'')+'</article>';
 }
 function render(){
- document.getElementById("users").textContent=(data.stats.users||0)+" users";
- document.getElementById("tasks").textContent=(data.stats.tasks||0)+" tasks";
- document.getElementById("reportsCount").textContent=(data.stats.reports||0)+" reports";
+ document.getElementById("users").textContent=(data.stats.users||0)+" کاربر";
+ document.getElementById("tasks").textContent=(data.stats.tasks||0)+" کار";
+ document.getElementById("reportsCount").textContent=(data.stats.reports||0)+" گزارش";
  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view===view));
  document.getElementById("taskBoard").classList.toggle("hidden",view!=="tasks");
  document.getElementById("reportGrid").classList.toggle("hidden",view!=="reports");
  if(view==="tasks"){
    const tasks=data.tasks.filter(matchCommon),b=document.getElementById("taskBoard");
-   b.innerHTML=columns.map(c=>{const items=tasks.filter(t=>t.status===c[0]);return '<section class="column" data-status="'+c[0]+'"><h2><span>'+c[1]+'</span><span class="count">'+items.length+'</span></h2><div class="cards">'+(items.map(taskCard).join("")||'<div class="empty">No tasks</div>')+'</div></section>'}).join("");
+   b.innerHTML=columns.map(c=>{const items=tasks.filter(t=>t.status===c[0]);return '<section class="column" data-status="'+c[0]+'"><h2><span>'+c[1]+'</span><span class="count">'+items.length+'</span></h2><div class="cards">'+(items.map(taskCard).join("")||'<div class="empty">فعلاً کاری نیست</div>')+'</div></section>'}).join("");
    bindDnD();
  } else {
    const reports=data.reports.filter(matchCommon),g=document.getElementById("reportGrid");
-   g.innerHTML=reports.map(reportCard).join("")||'<div class="empty">No work reports</div>';
+   g.innerHTML=reports.map(reportCard).join("")||'<div class="empty">فعلاً گزارش کاری نیست</div>';
  }
 }
 function bindDnD(){
@@ -95,7 +95,7 @@ function bindDnD(){
      const id=Number(el.dataset.id),status=col.dataset.status,task=data.tasks.find(x=>x.id===id);if(!task||task.status===status)return;
      const old=task.status;task.status=status;render();
      const r=await fetch("/admin/api/tasks/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});
-     if(!r.ok){task.status=old;render();alert("Update failed")}
+     if(!r.ok){task.status=old;render();alert("آپدیت نشد، یه بار دیگه امتحان کن")}
    });
  });
 }
