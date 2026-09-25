@@ -70,6 +70,11 @@ jobs:
             if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
               ufw allow 8080/tcp >/dev/null
             fi
+            if command -v iptables >/dev/null 2>&1; then
+              iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
+            fi
+
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; asyncio.run(ai._resolve_account_id())"
 
             for i in $(seq 1 20); do
               if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
