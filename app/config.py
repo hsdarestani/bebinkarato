@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     cloudflare_whisper_model: str = "@cf/openai/whisper"
 
     database_url: str = "sqlite:////data/bebinkarato.db"
-    default_timezone: str = "Europe/Berlin"
+    default_timezone: str = "Asia/Tehran"
 
     admin_username: str = "admin"
     admin_password: str = ""
