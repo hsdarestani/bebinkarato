@@ -26,6 +26,16 @@ class User(Base):
     last_seen_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    reports: Mapped[list["WorkReport"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class UserMode(Base):
+    __tablename__ = "user_modes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(16), default="tasks")
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
 
 
 class Task(Base):
@@ -55,3 +65,48 @@ class Task(Base):
     updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
 
     user: Mapped[User] = relationship(back_populates="tasks")
+
+
+class WorkReport(Base):
+    __tablename__ = "work_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
+
+    title: Mapped[str] = mapped_column(String(500))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    project: Mapped[str] = mapped_column(String(200), default="")
+    category: Mapped[str] = mapped_column(String(100), default="work")
+    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    work_date: Mapped[str] = mapped_column(String(10), index=True)
+
+    source: Mapped[str] = mapped_column(String(24), default="text")
+    original_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="submitted", index=True)
+
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+
+    user: Mapped[User] = relationship(back_populates="reports")
+    attachments: Mapped[list["ReportAttachment"]] = relationship(
+        back_populates="report", cascade="all, delete-orphan"
+    )
+
+
+class ReportAttachment(Base):
+    __tablename__ = "report_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("work_reports.id"), index=True)
+    telegram_file_id: Mapped[str] = mapped_column(Text)
+    telegram_file_unique_id: Mapped[str] = mapped_column(String(255), default="")
+    file_name: Mapped[str] = mapped_column(String(500), default="")
+    mime_type: Mapped[str] = mapped_column(String(255), default="")
+    file_type: Mapped[str] = mapped_column(String(32), default="document")
+    local_path: Mapped[str] = mapped_column(Text, default="")
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    caption: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+
+    report: Mapped[WorkReport] = relationship(back_populates="attachments")
