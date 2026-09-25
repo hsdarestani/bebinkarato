@@ -21,33 +21,27 @@ UPLOAD_ROOT = Path("/data/uploads")
 
 
 def _lang(user: User | None) -> str:
-    return "fa" if user and (user.language_code or "").lower().startswith("fa") else "en"
+    return "fa"
 
 
 def _t(key: str, lang: str) -> str:
     strings = {
-        "thinking": {"fa": "دارم کارهات رو مرتب می‌کنم…", "en": "Turning that into a plan…"},
-        "no_tasks": {"fa": "کار مشخصی از این پیام پیدا نکردم.", "en": "I couldn't find a clear action item in that message."},
-        "confirmed": {"fa": "✅ برنامه ثبت شد. من یادآوری‌ها رو هم پیگیری می‌کنم.", "en": "✅ Plan saved. I'll handle the reminders too."},
-        "discarded": {"fa": "حذف شد.", "en": "Discarded."},
-        "quota": {"fa": "سهمیه AI این ماهت تموم شده؛ گزارش کارت بازم ذخیره میشه.", "en": "Your AI allowance is used up; work reports will still be saved."},
-        "ai_error": {"fa": "فعلاً نتونستم AI رو اجرا کنم. دوباره امتحان کن.", "en": "I couldn't run the planner right now. Please try again."},
-        "report_saved": {"fa": "✅ گزارش کار ثبت شد", "en": "✅ Work report saved"},
+        "thinking": {"fa": "یه لحظه رفیق، دارم از توش کارها رو درمیارم…", "en": "Turning that into a plan…"},
+        "no_tasks": {"fa": "از این یکی چیزی که بشه تبدیلش کرد به کار درنیاوردم 😄 یه کم واضح‌تر بگو چی باید انجام بشه.", "en": "I couldn't find a clear action item in that message."},
+        "confirmed": {"fa": "اوکی شد 👌 چیدمش برات. یادآوریاشم پای منه.", "en": "✅ Plan saved. I'll handle the reminders too."},
+        "discarded": {"fa": "اوکی، انداختمش دور 🗑", "en": "Discarded."},
+        "quota": {"fa": "سهمیه هوش مصنوعی این ماهت پر شده 😅 ولی خیالت راحت، گزارش کارت گم نمیشه و ذخیره میشه.", "en": "Your AI allowance is used up; work reports will still be saved."},
+        "ai_error": {"fa": "یه گیری پیش اومد و مغزم جواب نداد 😅 یه بار دیگه بفرست.", "en": "I couldn't run the planner right now. Please try again."},
+        "report_saved": {"fa": "دمت گرم، ثبتش کردم ✅", "en": "✅ Work report saved"},
     }
     return strings.get(key, {}).get(lang, strings.get(key, {}).get("en", key))
 
 
 def _keyboard(lang: str) -> ReplyKeyboardMarkup:
-    if lang == "fa":
-        rows = [
-            [KeyboardButton("🗓 برنامه‌ریزی"), KeyboardButton("✅ گزارش کار")],
-            [KeyboardButton("📅 امروز"), KeyboardButton("📊 گزارش‌های من")],
-        ]
-    else:
-        rows = [
-            [KeyboardButton("🗓 Planning"), KeyboardButton("✅ Work report")],
-            [KeyboardButton("📅 Today"), KeyboardButton("📊 My reports")],
-        ]
+    rows = [
+        [KeyboardButton("🧠 کارامو بچین"), KeyboardButton("✅ گزارش کار")],
+        [KeyboardButton("📅 امروز چی دارم؟"), KeyboardButton("📊 گزارش‌های من")],
+    ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -159,20 +153,13 @@ def _default_reminder(scheduled_at: str | None, due_at: str | None) -> str | Non
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = _upsert_user(update)
     lang = _lang(user)
-    if lang == "fa":
-        text = (
-            "👋 خیلی ساده کار کن:\n\n"
-            "🗓 «برنامه‌ریزی» برای کارهایی که باید انجام بدی\n"
-            "✅ «گزارش کار» برای چیزهایی که انجام دادی\n\n"
-            "برای هر دو می‌تونی متن یا ویس بفرستی. برای گزارش کار عکس، PDF، فایل، ویدیو و صوت هم می‌تونی پیوست کنی."
-        )
-    else:
-        text = (
-            "👋 Keep it simple:\n\n"
-            "🗓 Planning is for work you need to do.\n"
-            "✅ Work report is for work you've completed.\n\n"
-            "Both accept text or voice. Work reports also accept photos, PDFs, files, video, and audio attachments."
-        )
+    text = (
+        "سلام رفیق 👋\n\n"
+        "اینجا لازم نیست فرم پر کنی و داستان داشته باشیم. هرچی تو سرت هست بریز اینجا، متن یا ویس.\n\n"
+        "🧠 «کارامو بچین» یعنی بگو چه کارایی داری، من خودم مرتبشون می‌کنم و زمان می‌چینم.\n"
+        "✅ «گزارش کار» یعنی بگو امروز چی کار کردی، من خودم تمیز و مرتب ثبتش می‌کنم.\n\n"
+        "عکس، PDF، فایل، ویدیو و صوت هم خواستی بنداز روش. خلاصه تو فقط بفرست، جمع و جورش با من 😎"
+    )
     await update.effective_message.reply_text(text, reply_markup=_keyboard(lang))
 
 
@@ -181,7 +168,7 @@ async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lang = _lang(user)
     if not context.args:
         await update.effective_message.reply_text(
-            ("منطقه زمانی فعلی: " if lang == "fa" else "Current timezone: ") + user.timezone,
+            "منطقه زمانیت الان اینه: " + user.timezone,
             reply_markup=_keyboard(lang),
         )
         return
@@ -189,7 +176,7 @@ async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         ZoneInfo(value)
     except ZoneInfoNotFoundError:
-        await update.effective_message.reply_text("Invalid timezone. Example: Europe/Berlin or Asia/Tehran")
+        await update.effective_message.reply_text("این منطقه زمانی رو نفهمیدم 😅 مثلاً اینجوری بزن: Europe/Berlin یا Asia/Tehran")
         return
     with SessionLocal() as db:
         db_user = db.get(User, user.id)
@@ -197,7 +184,7 @@ async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             db_user.timezone = value
             db.commit()
     await update.effective_message.reply_text(
-        ("✅ تنظیم شد: " if lang == "fa" else "✅ Set to: ") + value,
+        "اوکیه 👌 منطقه زمانیت شد: " + value,
         reply_markup=_keyboard(lang),
     )
 
@@ -206,11 +193,7 @@ async def task_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = _upsert_user(update)
     _set_mode(user.id, "tasks")
     lang = _lang(user)
-    text = (
-        "🗓 حالت برنامه‌ریزی فعاله. هرچی باید انجام بدی با متن یا ویس بفرست."
-        if lang == "fa"
-        else "🗓 Planning mode is active. Send what you need to do by text or voice."
-    )
+    text = "بریز ببینم چه کارایی ریخته سرت 😄 متن یا ویس بفرست، خودم جمعش می‌کنم و می‌چینمشون برات."
     await update.effective_message.reply_text(text, reply_markup=_keyboard(lang))
 
 
@@ -218,11 +201,7 @@ async def report_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = _upsert_user(update)
     _set_mode(user.id, "reports")
     lang = _lang(user)
-    text = (
-        "✅ حالت گزارش کار فعاله. هر کاری انجام دادی با متن یا ویس بفرست؛ عکس، PDF و فایل هم می‌تونی مستقیم پیوست کنی."
-        if lang == "fa"
-        else "✅ Work report mode is active. Send completed work as text or voice, or attach a photo, PDF, or file."
-    )
+    text = "بگو ببینم چی کار کردی 😎 متن، ویس، عکس، PDF یا هر فایلی داری بنداز اینجا؛ خودم ازش گزارش مرتب درمیارم."
     await update.effective_message.reply_text(text, reply_markup=_keyboard(lang))
 
 
@@ -278,11 +257,11 @@ async def _create_draft(update: Update, user: User, text: str, source: str, voic
             line += f"  ⏳ {deadline}"
         lines.append(line)
 
-    title = "این برنامه رو پیشنهاد می‌کنم:" if lang == "fa" else "Here's the proposed plan:"
+    title = "خب، از حرفات این برنامه رو درآوردم 👇"
     keyboard = InlineKeyboardMarkup(
         [[
-            InlineKeyboardButton("✅ تأیید" if lang == "fa" else "✅ Confirm", callback_data=f"confirm|{batch_id}"),
-            InlineKeyboardButton("🗑 حذف" if lang == "fa" else "🗑 Discard", callback_data=f"discard|{batch_id}"),
+            InlineKeyboardButton("✅ اوکیه، ثبتش کن", callback_data=f"confirm|{batch_id}"),
+            InlineKeyboardButton("🗑 نه، بیخیالش", callback_data=f"discard|{batch_id}"),
         ]]
     )
     await status_msg.edit_text(title + "\n\n" + "\n\n".join(lines), reply_markup=keyboard)
@@ -292,7 +271,7 @@ def _fallback_report(user: User, text: str, fallback_title: str = "") -> dict:
     clean = (text or "").strip()
     title = clean.splitlines()[0][:180] if clean else fallback_title[:180]
     if not title:
-        title = "Work report"
+        title = "گزارش کار"
     return {
         "title": title,
         "summary": clean,
@@ -397,12 +376,12 @@ async def _create_report(
 
     details = [f"{_t('report_saved', lang)}\n{parsed['title']}"]
     if parsed.get("project"):
-        details.append(("📁 " if lang == "fa" else "📁 ") + parsed["project"])
+        details.append("📁 " + parsed["project"])
     if parsed.get("duration_minutes"):
-        details.append(f"⏱ {parsed['duration_minutes']} min")
+        details.append(f"⏱ {parsed['duration_minutes']} دقیقه")
     details.append(f"📅 {parsed.get('work_date') or _today_local(user)}")
     if attachment_saved:
-        details.append("📎 " + ("پیوست ذخیره شد" if lang == "fa" else "Attachment saved"))
+        details.append("📎 فایلتم چسبید به گزارش")
 
     await update.effective_message.reply_text("\n".join(details), reply_markup=_keyboard(lang))
     return report_id
@@ -414,13 +393,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not text:
         return
 
-    if text in {"🗓 برنامه‌ریزی", "🗓 Planning"}:
+    if text in {"🧠 کارامو بچین", "🗓 برنامه‌ریزی", "🗓 Planning"}:
         await task_mode(update, context)
         return
     if text in {"✅ گزارش کار", "✅ Work report"}:
         await report_mode(update, context)
         return
-    if text in {"📅 امروز", "📅 Today"}:
+    if text in {"📅 امروز چی دارم؟", "📅 امروز", "📅 Today"}:
         await today(update, context)
         return
     if text in {"📊 گزارش‌های من", "📊 My reports"}:
@@ -467,15 +446,13 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             }
             await _create_report(
                 update, context, user, transcript, "voice", voice.duration or 0,
-                fallback_title="Voice report", attachment=attachment
+                fallback_title="گزارش صوتی", attachment=attachment
             )
         except Exception as exc:
             print(f"Voice report save error: {exc}")
             try:
                 await msg.edit_text(
-                    "نتونستم این ویس رو ذخیره کنم. لطفاً دوباره بفرست."
-                    if _lang(user) == "fa"
-                    else "I couldn't save this voice report. Please send it again."
+                    "این ویسه یه گیری داشت و ذخیره نشد 😅 یه بار دیگه بفرستش."
                 )
             except Exception:
                 pass
@@ -576,9 +553,7 @@ async def media_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await _save_attachment(context, report_id=recent_id, **attachment)
             await update.effective_message.reply_text(
                 (
-                    f"📎 فایل به گزارش «{recent_title}» اضافه شد."
-                    if _lang(user) == "fa"
-                    else f"📎 File attached to “{recent_title}”."
+                    f"📎 گرفتمش، چسبوندمش به گزارش «{recent_title}» 👌"
                 ),
                 reply_markup=_keyboard(_lang(user)),
             )
@@ -656,7 +631,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_reply_markup(reply_markup=None)
         if created_report:
             await query.message.reply_text(
-                "✅ انجام شد و به گزارش کار هم اضافه شد." if _lang(user) == "fa" else "✅ Done and added to your work log.",
+                "دمت گرم، اینم انجام‌شده حساب شد ✅ خودکار گذاشتمش تو گزارش کارت هم.",
                 reply_markup=_keyboard(_lang(user)),
             )
 
@@ -684,13 +659,13 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not selected:
         await update.effective_message.reply_text(
-            "امروز کاری برنامه‌ریزی نشده 🎉" if _lang(user) == "fa" else "Nothing scheduled for today 🎉",
+            "امروز چیزی تو برنامت نیست 😎 یه نفس بکش!",
             reply_markup=_keyboard(_lang(user)),
         )
         return
 
     for task in selected[:30]:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"done|{task.id}")]])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ انجامش دادم", callback_data=f"done|{task.id}")]])
         await update.effective_message.reply_text(
             f"• {task.title}\n🗓 {_local(task.scheduled_at or task.due_at, user.timezone)}",
             reply_markup=keyboard,
@@ -707,7 +682,7 @@ async def upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ).all()
     if not tasks:
         await update.effective_message.reply_text(
-            "لیستت خالیه." if _lang(user) == "fa" else "Your list is empty.",
+            "فعلاً چیزی تو لیستت نیست 👌",
             reply_markup=_keyboard(_lang(user)),
         )
         return
@@ -731,7 +706,7 @@ async def my_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if not rows:
         await update.effective_message.reply_text(
-            "هنوز گزارشی ثبت نکردی." if _lang(user) == "fa" else "You haven't submitted any work reports yet.",
+            "هنوز هیچ گزارش کاری ندادی 😄 هر وقت کاری کردی بفرست، من برات نگهش می‌دارم.",
             reply_markup=_keyboard(_lang(user)),
         )
         return
@@ -742,7 +717,7 @@ async def my_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if report.project:
             line += f" · {report.project}"
         if report.duration_minutes:
-            line += f" · {report.duration_minutes}m"
+            line += f" · {report.duration_minutes} دقیقه"
         if attachment_count:
             line += f" · 📎 {attachment_count}"
         parts.append(line)
