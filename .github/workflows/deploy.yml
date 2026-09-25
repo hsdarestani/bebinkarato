@@ -60,7 +60,7 @@ jobs:
               printf '%s\n' "CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_ACCOUNT_ID"
               printf '%s\n' "ADMIN_USERNAME=admin"
               printf '%s\n' "ADMIN_PASSWORD=$ADMIN_PASSWORD"
-              printf '%s\n' "DEFAULT_TIMEZONE=Europe/Berlin"
+              printf '%s\n' "DEFAULT_TIMEZONE=Asia/Tehran"
               printf '%s\n' "FREE_AI_REQUESTS=60"
               printf '%s\n' "FREE_VOICE_MINUTES=20"
             } > .env
@@ -77,8 +77,9 @@ jobs:
             fi
 
             docker compose exec -T app python -c "import asyncio; from app.bot import ai; asyncio.run(ai._resolve_account_id())"
-            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_tasks('Tomorrow at 10 call the dentist', 'Europe/Berlin', 'en')); assert r and r[0].get('title')"
-            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_report('Today I fixed the payment bug for two hours', 'Europe/Berlin', 'en')); assert r.get('title') and r.get('work_date')"
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_tasks('فردا ساعت ده باید به دندانپزشک زنگ بزنم', 'Asia/Tehran', 'fa')); assert r and r[0].get('title') and not any(x in r[0].get('title','').lower() for x in ['call','dentist'])"
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_report('امروز باگ پرداخت رو حل کردم و دو ساعت روش بودم', 'Asia/Tehran', 'fa')); assert r.get('title') and r.get('work_date') and r.get('duration_minutes')==120"
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; assert asyncio.run(ai.classify_intent('رباته رو ساختم کامل', 'Asia/Tehran'))=='report'; assert asyncio.run(ai.classify_intent('یه ربات باید بسازم فیچراشو درارم', 'Asia/Tehran'))=='plan'; assert asyncio.run(ai.classify_intent('امروز چی دارم؟', 'Asia/Tehran'))=='today'"
 
             for i in $(seq 1 30); do
               if docker compose exec -T app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1 \
