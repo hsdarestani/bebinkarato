@@ -6,3 +6,4 @@ httpx>=0.28,<1
 pydantic-settings>=2.7,<3
 python-multipart>=0.0.20,<1
 tzdata>=2025.1
+jdatetime>=5.2,<6
