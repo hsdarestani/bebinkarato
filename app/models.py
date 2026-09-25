@@ -110,3 +110,13 @@ class ReportAttachment(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
 
     report: Mapped[WorkReport] = relationship(back_populates="attachments")
+
+
+class PendingAction(Base):
+    __tablename__ = "pending_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="")
+    ref: Mapped[str] = mapped_column(String(120), default="")
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
