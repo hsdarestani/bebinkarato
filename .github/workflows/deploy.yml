@@ -75,6 +75,7 @@ jobs:
             fi
 
             docker compose exec -T app python -c "import asyncio; from app.bot import ai; asyncio.run(ai._resolve_account_id())"
+            docker compose exec -T app python -c "import asyncio; from app.bot import ai; r=asyncio.run(ai.parse_tasks('Tomorrow at 10 call the dentist', 'Europe/Berlin', 'en')); assert r and r[0].get('title')"
 
             for i in $(seq 1 20); do
               if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
