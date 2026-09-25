@@ -1,0 +1,82 @@
+name: Validate and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m compileall -q app
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          password: ${{ secrets.PASS }}
+          envs: TELEGRAM_BOT_TOKEN,CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID,ADMIN_PASSWORD
+          script_stop: true
+          script: |
+            set -eu
+            if ! command -v docker >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y docker.io git curl
+            fi
+            if ! docker compose version >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin
+            fi
+
+            mkdir -p /opt/bebinkarato
+            if [ ! -d /opt/bebinkarato/app/.git ]; then
+              git clone https://github.com/hsdarestani/bebinkarato.git /opt/bebinkarato/app
+            fi
+
+            cd /opt/bebinkarato/app
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p data
+
+            umask 077
+            {
+              printf '%s\n' "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+              printf '%s\n' "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN"
+              printf '%s\n' "CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_ACCOUNT_ID"
+              printf '%s\n' "ADMIN_USERNAME=admin"
+              printf '%s\n' "ADMIN_PASSWORD=$ADMIN_PASSWORD"
+              printf '%s\n' "DEFAULT_TIMEZONE=Europe/Berlin"
+              printf '%s\n' "FREE_AI_REQUESTS=60"
+              printf '%s\n' "FREE_VOICE_MINUTES=20"
+            } > .env
+
+            docker compose up -d --build --remove-orphans
+
+            if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+              ufw allow 8080/tcp >/dev/null
+            fi
+
+            for i in $(seq 1 20); do
+              if curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+                exit 0
+              fi
+              sleep 3
+            done
+
+            docker compose logs --tail=120
+            exit 1
