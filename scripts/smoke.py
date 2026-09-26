@@ -39,6 +39,39 @@ async def main() -> None:
         assert await ai.classify_intent("رباته رو ساختم کامل", "Asia/Tehran") == "report"
         assert await ai.classify_intent("یه ربات باید بسازم فیچراشو درارم", "Asia/Tehran") == "plan"
         assert await ai.classify_intent("امروز چی دارم؟", "Asia/Tehran") == "today"
+
+        revised = await ai.revise_tasks(
+            [
+                {
+                    "title": "سایت گرویتاس را درست کنید",
+                    "notes": "",
+                    "project": "سایت گرویتاس",
+                    "priority": "medium",
+                    "estimated_minutes": 120,
+                    "due_at": None,
+                    "due_source": "none",
+                    "scheduled_at": None,
+                    "reminder_at": None,
+                },
+                {
+                    "title": "باشگاه را بردارید",
+                    "notes": "",
+                    "project": "",
+                    "priority": "medium",
+                    "estimated_minutes": 30,
+                    "due_at": None,
+                    "due_source": "none",
+                    "scheduled_at": None,
+                    "reminder_at": None,
+                },
+            ],
+            "پاساژ رو بردارید نه، برم باشگاه",
+            "Asia/Tehran",
+            original_text="سایت گرویتاس رو درست کنم، پاساژ رو بردارید، موز بخرم",
+        )
+        assert len(revised) == 2
+        assert "باشگاه" in revised[1]["title"]
+        assert "بردارید" not in revised[1]["title"]
     finally:
         await ai.close()
 
