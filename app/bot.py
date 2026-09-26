@@ -477,11 +477,131 @@ async def _handle_edit_text(update: Update, user: User, instruction: str, pendin
     return False
 
 
-async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, voice_seconds: int = 0) -> None:
+async def _replace_edit_from_voice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user: User,
+    transcript: str,
+    voice_seconds: int,
+    pending: tuple[str, str],
+) -> bool:
+    kind, ref = pending
+
+    if kind == "task_edit":
+        if not _quota_ok(user, voice_seconds):
+            await update.effective_message.reply_text("سهمیه هوش مصنوعی این ماهت پر شده 😅")
+            return True
+        try:
+            fresh = await ai.parse_tasks(transcript, IRAN_TZ, "fa")
+            if not fresh:
+                raise AIError("No tasks parsed from replacement voice.")
+            _charge_usage(user.id, voice_seconds)
+        except Exception as exc:
+            print(f"Voice task replacement error: {exc}")
+            await update.effective_message.reply_text(
+                "ویستو شنیدم، ولی نتونستم از نو به برنامه تبدیلش کنم 😅 دوباره بفرست یا خیلی کوتاه بگو چی باید عوض شه."
+            )
+            return True
+
+        with SessionLocal() as db:
+            old = db.scalars(
+                select(Task).where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+            ).all()
+            if not old:
+                _clear_pending(user.id)
+                return False
+            for task in old:
+                db.delete(task)
+            for item in fresh:
+                db.add(Task(
+                    user_id=user.id,
+                    batch_id=ref,
+                    title=item["title"],
+                    notes=item.get("notes", ""),
+                    project=item.get("project", ""),
+                    priority=item.get("priority", "medium"),
+                    estimated_minutes=item.get("estimated_minutes", 30),
+                    status="draft",
+                    source="voice",
+                    original_text=transcript,
+                    due_at=item.get("due_at"),
+                    due_source=item.get("due_source", "none"),
+                    scheduled_at=item.get("scheduled_at"),
+                    reminder_at=item.get("reminder_at") or _default_reminder(
+                        item.get("scheduled_at"), item.get("due_at")
+                    ),
+                ))
+            db.commit()
+            tasks = db.scalars(
+                select(Task).where(Task.batch_id == ref, Task.user_id == user.id).order_by(Task.id)
+            ).all()
+            preview = render_task_preview(tasks)
+
+        _set_pending(user.id, "task_preview", ref)
+        await update.effective_message.reply_text(
+            "اوکی، این ویس رو نسخه جدید حرفت گرفتم و از اول چیدمش 👇"
+        )
+        await update.effective_message.reply_text(preview, reply_markup=task_preview_keyboard(ref))
+        return True
+
+    if kind == "report_edit":
+        report_id = int(ref)
+        try:
+            fresh = await ai.parse_report(transcript, IRAN_TZ, "fa")
+            if _quota_ok(user, voice_seconds):
+                _charge_usage(user.id, voice_seconds)
+        except Exception as exc:
+            print(f"Voice report replacement error: {exc}")
+            await update.effective_message.reply_text(
+                "ویستو شنیدم، ولی نتونستم گزارش رو از نو بسازم 😅 دوباره بفرست یا کوتاه بگو چی باید عوض شه."
+            )
+            return True
+
+        with SessionLocal() as db:
+            report = db.get(WorkReport, report_id)
+            if not report or report.user_id != user.id or report.status != "draft":
+                _clear_pending(user.id)
+                return False
+            report.title = fresh["title"]
+            report.summary = fresh.get("summary", "")
+            report.project = fresh.get("project", "")
+            report.category = fresh.get("category", "کار")
+            report.duration_minutes = fresh.get("duration_minutes")
+            report.work_date = fresh.get("work_date") or report.work_date
+            report.source = "voice"
+            report.original_text = transcript
+            report.updated_at = utc_now_iso()
+            db.commit()
+            db.refresh(report)
+            _ = list(report.attachments)
+            preview = render_report_preview(report)
+
+        _set_pending(user.id, "report_preview", str(report_id))
+        await update.effective_message.reply_text(
+            "اوکی، این ویس رو نسخه جدید گزارش گرفتم و از اول ساختمش 👇"
+        )
+        await update.effective_message.reply_text(preview, reply_markup=report_preview_keyboard(report_id))
+        return True
+
+    return False
+
+
+async def route_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    voice_seconds: int = 0,
+    from_voice: bool = False,
+) -> None:
     user = _upsert_user(update)
     pending = _get_pending(user.id)
     if pending and pending[0] in {"task_edit", "report_edit"}:
-        handled = await _handle_edit_text(update, user, text, pending)
+        if from_voice:
+            handled = await _replace_edit_from_voice(
+                update, context, user, text, voice_seconds, pending
+            )
+        else:
+            handled = await _handle_edit_text(update, user, text, pending)
         if handled:
             return
 
@@ -527,11 +647,13 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await msg.delete()
         except Exception:
             pass
-        pending = _get_pending(user.id)
-        if pending and pending[0] == "report_edit":
-            await route_text(update, context, transcript, voice.duration or 0)
-            return
-        await route_text(update, context, transcript, voice.duration or 0)
+        await route_text(
+            update,
+            context,
+            transcript,
+            voice.duration or 0,
+            from_voice=True,
+        )
     except Exception as exc:
         print(f"Voice error: {exc}")
         await msg.edit_text("این ویسه رو نتونستم درست بخونم 😅 یه بار دیگه بفرست.")
