@@ -963,6 +963,127 @@ async def _replace_edit_from_voice(
     return False
 
 
+async def _refine_done_match_preview(
+    update: Update,
+    user: User,
+    text: str,
+    pending: tuple[str, str],
+) -> bool:
+    kind, ref = pending
+    if kind != "done_match_preview":
+        return False
+
+    try:
+        payload = json.loads(ref)
+        current_ids = [int(x) for x in payload.get("t", [])]
+        report_ids = [int(x) for x in payload.get("r", [])]
+    except Exception:
+        _clear_pending(user.id)
+        return False
+
+    with SessionLocal() as db:
+        open_tasks = db.scalars(
+            select(Task)
+            .where(Task.user_id == user.id, Task.status.in_(["todo", "doing"]))
+            .order_by(Task.id)
+        ).all()
+        task_payloads = [
+            {
+                "id": task.id,
+                "title": task.title,
+                "notes": task.notes,
+                "project": task.project,
+                "original_text": task.original_text,
+            }
+            for task in open_tasks
+        ]
+
+    if not task_payloads:
+        _clear_pending(user.id)
+        return False
+
+    selected_ids = None
+    if _quota_ok(user):
+        try:
+            selected_ids = await ai.refine_completed_task_selection(
+                text,
+                current_ids,
+                task_payloads,
+                IRAN_TZ,
+            )
+            _charge_usage(user.id)
+        except Exception as exc:
+            print(f"Completion refinement AI error: {exc}")
+
+    if selected_ids is None:
+        selected_ids = list(current_ids)
+
+    # fallback محلی برای اضافه/حذف‌های خیلی روشن، فقط اگر AI نتیجه معنادار نداد
+    if not selected_ids and current_ids:
+        n = _normalize_fa(text)
+        local = _local_completed_task_matches(text, task_payloads)
+        if re.search(r"(انجام\s+ندادم|نکردم|نه|بردار|حذف)", n) and local:
+            selected_ids = [task_id for task_id in current_ids if task_id not in local]
+        elif "فقط" in n and local:
+            selected_ids = local
+        elif local:
+            selected_ids = list(dict.fromkeys(current_ids + local))
+
+    valid_ids = {int(task["id"]) for task in task_payloads}
+    selected_ids = [task_id for task_id in selected_ids if task_id in valid_ids]
+
+    # اگر کاربر گفت «هم» و AI به اشتباه قبلی‌ها را انداخت، union محافظه‌کارانه
+    n = _normalize_fa(text)
+    if "هم" in n:
+        selected_ids = list(dict.fromkeys(current_ids + selected_ids))
+
+    ref_new = json.dumps(
+        {"t": selected_ids, "r": report_ids},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    _set_pending(user.id, "done_match_preview", ref_new)
+
+    with SessionLocal() as db:
+        selected_tasks = db.scalars(
+            select(Task)
+            .where(Task.user_id == user.id, Task.id.in_(selected_ids))
+            .order_by(Task.id)
+        ).all() if selected_ids else []
+
+        lines = ["اوکی، پیش‌نمایش رو اصلاح کردم 👌", ""]
+        if selected_tasks:
+            lines.append("این کارا انجام‌شده حساب می‌شن:")
+            for task in selected_tasks:
+                lines.append(f"✅ {task.title}")
+        else:
+            lines.append("فعلاً هیچ Taskی رو انجام‌شده نگه نداشتم.")
+
+        if report_ids:
+            reports = db.scalars(
+                select(WorkReport)
+                .where(
+                    WorkReport.user_id == user.id,
+                    WorkReport.id.in_(report_ids),
+                    WorkReport.status == "draft_match",
+                )
+                .order_by(WorkReport.id)
+            ).all()
+            if reports:
+                lines.append("")
+                lines.append("این گزارش‌های جدید هم جدا می‌مونن:")
+                for report in reports:
+                    lines.append(f"➕ {report.title}")
+
+    lines.append("")
+    lines.append("همین‌ها رو ثبت کنم؟")
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=done_match_keyboard(),
+    )
+    return True
+
+
 async def route_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -975,6 +1096,12 @@ async def route_text(
 
     # کاربر لازم نیست برای رد کردن پیش‌نمایش حتماً دکمه بزند.
     # «نه...»، «منظورم...»، «میگم...» یعنی پیش‌نمایش قبلی را کنار بگذار و حرف جدید را بفهم.
+    # اگر روی پیش‌نمایش «کارهای انجام‌شده» هستیم، هر اصلاح طبیعی را روی همان مجموعه اعمال کن.
+    if pending and pending[0] == "done_match_preview":
+        handled = await _refine_done_match_preview(update, user, text, pending)
+        if handled:
+            return
+
     correction_text = _normalize_fa(text)
     natural_reject = bool(re.match(
         r"^(نه|نخیر|منظورم|میگم|می گم|اشتباه|درست نیست|اصلاح)",
