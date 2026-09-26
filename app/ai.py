@@ -111,16 +111,19 @@ Schema: {"text":"متن تمیزشده"}"""
 فقط یکی از این intentها را برگردان:
 plan = کاربر درباره کارهایی که باید انجام بدهد، برنامه آینده، ددلاین، یادآوری یا برنامه‌ریزی حرف می‌زند
 report = کاربر درباره کاری که انجام داده یا تمام کرده گزارش می‌دهد
-today = می‌پرسد امروز چه کارهایی دارد
+today = می‌پرسد امروز چه کارهایی برای انجام دادن دارد
+today_reports = می‌پرسد امروز چه کارهایی انجام داده، امروز چه کار کردیم، امروز چی انجام شد، یا خلاصه عملکرد امروز را می‌خواهد
 upcoming = می‌پرسد کارهای بعدی یا آینده‌اش چیست
-reports = گزارش‌های قبلی یا کارهای انجام‌شده‌اش را می‌خواهد ببیند
+reports = گزارش‌های قبلی یا کارهای انجام‌شده‌اش را به طور کلی می‌خواهد ببیند
 unknown = هیچ‌کدام روشن نیست
 
 نکته‌های مهم:
+- «امروز چی دارم؟»، «کارای امروزم چیه؟» => today
+- «امروز چیکار کردیم؟»، «امروز چی انجام دادم؟»، «کارای انجام‌شده امروز رو بگو» => today_reports
 - جمله‌هایی مثل «رباته رو ساختم کامل»، «امروز فلان باگ رو حل کردم»، «جلسه رو انجام دادم» حتما report هستند.
 - جمله‌هایی مثل «یه ربات باید بسازم»، «فردا باید...» plan هستند.
 - فقط JSON معتبر برگردان.
-Schema: {"intent":"plan|report|today|upcoming|reports|unknown"}"""
+Schema: {"intent":"plan|report|today|today_reports|upcoming|reports|unknown"}"""
         result = await self._run(
             settings.cloudflare_llm_model,
             {
@@ -134,7 +137,7 @@ Schema: {"intent":"plan|report|today|upcoming|reports|unknown"}"""
         )
         obj = self._extract_json(result.get("response") or result.get("text") or result)
         intent = str(obj.get("intent") or "unknown")
-        return intent if intent in {"plan", "report", "today", "upcoming", "reports", "unknown"} else "unknown"
+        return intent if intent in {"plan", "report", "today", "today_reports", "upcoming", "reports", "unknown"} else "unknown"
 
     async def parse_tasks(self, text: str, timezone_name: str, language_code: str = "fa") -> list[dict]:
         try:
