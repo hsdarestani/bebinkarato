@@ -412,12 +412,156 @@ async def _save_attachment(
         return item.id
 
 
+def _deadline_was_explicit(text: str) -> bool:
+    normalized = (text or "").replace("ي", "ی").replace("ك", "ک")
+    return bool(re.search(
+        r"(ددلاین|مهلت|تا\s+(?:امروز|فردا|پس\s*فردا|آخر|پایان|ساعت|قبل)|"
+        r"قبل\s+از|نهایت(?:ا|اً)?|حداکثر|باید\s+تا)",
+        normalized,
+        flags=re.I,
+    ))
+
+
+def _clean_fake_deadlines(tasks: list[Task]) -> None:
+    for task in tasks:
+        if task.due_at and not _deadline_was_explicit(task.original_text or ""):
+            task.due_at = None
+            task.due_source = "none"
+            if task.reminder_at and not task.scheduled_at:
+                task.reminder_at = None
+
+
+def _simple_replacement(instruction: str) -> tuple[str, str] | None:
+    text = (instruction or "").strip()
+    text = re.sub(r"^(?:میگم|می‌گم|منظورم|یعنی)\s+", "", text).strip()
+    text = text.strip(" .،,!؟?")
+
+    patterns = [
+        r"^(.+?)\s+(?:نه|نیست)\s*[,،]?\s*(.+?)$",
+        r"^(.+?)\s+(?:رو|را)\s+(?:بکن|کن|تبدیل\s+کن\s+به)\s+(.+?)$",
+        r"^(.+?)\s+(?:بشه|بشود)\s+(.+?)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, text, flags=re.I)
+        if not match:
+            continue
+        old = match.group(1).strip(" «»\"'")
+        new = match.group(2).strip(" «»\"'")
+        if old and new and old != new and len(old) <= 80 and len(new) <= 80:
+            return old, new
+    return None
+
+
+def _simple_delete_index(instruction: str) -> int | None:
+    text = (instruction or "").strip()
+    words = {
+        "اولی": 0, "اول": 0,
+        "دومی": 1, "دوم": 1,
+        "سومی": 2, "سوم": 2,
+        "چهارمی": 3, "چهارم": 3,
+        "پنجمی": 4, "پنجم": 4,
+        "ششمی": 5, "ششم": 5,
+    }
+    if not re.search(r"(حذف|پاک|بردار|بیخیال)", text):
+        return None
+    for word, index in words.items():
+        if word in text:
+            return index
+    match = re.search(r"(?:شماره|مورد)\s*([۰-۹0-9]+)", text)
+    if match:
+        raw = match.group(1).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+        try:
+            return max(0, int(raw) - 1)
+        except Exception:
+            return None
+    return None
+
+
+async def _try_simple_task_edit(update: Update, user: User, ref: str, instruction: str) -> bool:
+    replacement = _simple_replacement(instruction)
+    delete_index = _simple_delete_index(instruction)
+
+    if replacement is None and delete_index is None:
+        return False
+
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(Task)
+            .where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+            .order_by(Task.id)
+        ).all()
+        if not tasks:
+            _clear_pending(user.id)
+            return False
+
+        changed = False
+        if replacement is not None:
+            old, new = replacement
+            for task in tasks:
+                for field in ("title", "notes", "project"):
+                    value = getattr(task, field) or ""
+                    if old in value:
+                        setattr(task, field, value.replace(old, new))
+                        changed = True
+
+            if not changed:
+                await update.effective_message.reply_text(
+                    f"«{old}» رو توی چیزایی که فهمیده بودم پیدا نکردم. یه کم دقیق‌تر بگو کدوم مورد رو می‌گی."
+                )
+                return True
+
+        elif delete_index is not None:
+            if delete_index >= len(tasks):
+                await update.effective_message.reply_text(
+                    "اون شماره‌ای که گفتی توی لیست نیست 😅"
+                )
+                return True
+            db.delete(tasks[delete_index])
+            changed = True
+
+        remaining = [task for i, task in enumerate(tasks) if delete_index is None or i != delete_index]
+        _clean_fake_deadlines(remaining)
+        for task in remaining:
+            task.updated_at = utc_now_iso()
+        db.commit()
+
+        tasks = db.scalars(
+            select(Task)
+            .where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+            .order_by(Task.id)
+        ).all()
+        if not tasks:
+            _clear_pending(user.id)
+            await update.effective_message.reply_text("اوکی، دیگه چیزی از این لیست نموند.")
+            return True
+        preview = render_task_preview(tasks)
+
+    _set_pending(user.id, "task_preview", ref)
+    if replacement is not None:
+        await update.effective_message.reply_text(
+            f"آره گرفتم 👌 «{replacement[0]}» رو کردم «{replacement[1]}»."
+        )
+    else:
+        await update.effective_message.reply_text("اوکی، حذفش کردم 👌")
+    await update.effective_message.reply_text(preview, reply_markup=task_preview_keyboard(ref))
+    return True
+
+
 async def _handle_edit_text(update: Update, user: User, instruction: str, pending: tuple[str, str]) -> bool:
     kind, ref = pending
     if kind == "task_edit":
+        if await _try_simple_task_edit(update, user, ref, instruction):
+            return True
+
         with SessionLocal() as db:
-            tasks = db.scalars(select(Task).where(Task.batch_id == ref).order_by(Task.id)).all()
+            tasks = db.scalars(
+                select(Task)
+                .where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+                .order_by(Task.id)
+            ).all()
             current = [_task_payload(t) for t in tasks]
+            original_text = tasks[0].original_text if tasks else ""
+            original_source = tasks[0].source if tasks else "edit"
         try:
             revised = await ai.revise_tasks(current, instruction, IRAN_TZ)
         except Exception as exc:
@@ -425,20 +569,28 @@ async def _handle_edit_text(update: Update, user: User, instruction: str, pendin
             await update.effective_message.reply_text("نتونستم اصلاحش کنم 😅 یه بار دیگه بگو چی رو عوض کنم.")
             return True
         with SessionLocal() as db:
-            old = db.scalars(select(Task).where(Task.batch_id == ref)).all()
+            old = db.scalars(
+                select(Task).where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+            ).all()
             for task in old:
                 db.delete(task)
             for item in revised:
+                due_at = item.get("due_at") if _deadline_was_explicit(original_text) else None
+                due_source = item.get("due_source", "none") if due_at else "none"
                 db.add(Task(
                     user_id=user.id, batch_id=ref, title=item["title"], notes=item.get("notes", ""),
                     project=item.get("project", ""), priority=item.get("priority", "medium"),
-                    estimated_minutes=item.get("estimated_minutes", 30), status="draft", source="edit",
-                    original_text=instruction, due_at=item.get("due_at"), due_source=item.get("due_source", "none"),
+                    estimated_minutes=item.get("estimated_minutes", 30), status="draft", source=original_source,
+                    original_text=original_text, due_at=due_at, due_source=due_source,
                     scheduled_at=item.get("scheduled_at"),
-                    reminder_at=item.get("reminder_at") or _default_reminder(item.get("scheduled_at"), item.get("due_at")),
+                    reminder_at=item.get("reminder_at") or _default_reminder(item.get("scheduled_at"), due_at),
                 ))
             db.commit()
-            tasks = db.scalars(select(Task).where(Task.batch_id == ref).order_by(Task.id)).all()
+            tasks = db.scalars(
+                select(Task)
+                .where(Task.batch_id == ref, Task.user_id == user.id, Task.status == "draft")
+                .order_by(Task.id)
+            ).all()
             preview = render_task_preview(tasks)
         _set_pending(user.id, "task_preview", ref)
         await update.effective_message.reply_text(preview, reply_markup=task_preview_keyboard(ref))
