@@ -347,7 +347,8 @@ def _local_completed_task_matches(text: str, tasks: list[dict]) -> list[int]:
     if not input_tokens:
         return []
 
-    matches = []
+    prepared = []
+    token_frequency: dict[str, int] = {}
     for task in tasks:
         task_text = " ".join([
             str(task.get("title") or ""),
@@ -356,13 +357,20 @@ def _local_completed_task_matches(text: str, tasks: list[dict]) -> list[int]:
         ])
         tn = _normalize_fa(task_text)
         task_tokens = {t for t in tn.split() if len(t) >= 2 and t not in stop}
+        prepared.append((task, task_tokens))
+        for token in task_tokens:
+            token_frequency[token] = token_frequency.get(token, 0) + 1
+
+    matches = []
+    for task, task_tokens in prepared:
         overlap = input_tokens & task_tokens
         if not overlap:
             continue
 
-        # محافظه‌کارانه: یک واژه شاخص بلند یا حداقل دو واژه مشترک.
+        # واژه بلند، دو واژه مشترک، یا یک اسم کوتاه ولی یکتا مثل «موز».
         strong = any(len(t) >= 4 for t in overlap)
-        if strong or len(overlap) >= 2:
+        unique_short = any(len(t) >= 3 and token_frequency.get(t) == 1 for t in overlap)
+        if strong or unique_short or len(overlap) >= 2:
             try:
                 matches.append(int(task["id"]))
             except Exception:
@@ -964,6 +972,54 @@ async def route_text(
 ) -> None:
     user = _upsert_user(update)
     pending = _get_pending(user.id)
+
+    # کاربر لازم نیست برای رد کردن پیش‌نمایش حتماً دکمه بزند.
+    # «نه...»، «منظورم...»، «میگم...» یعنی پیش‌نمایش قبلی را کنار بگذار و حرف جدید را بفهم.
+    correction_text = _normalize_fa(text)
+    natural_reject = bool(re.match(
+        r"^(نه|نخیر|منظورم|میگم|می گم|اشتباه|درست نیست|اصلاح)",
+        correction_text,
+    ))
+    if pending and natural_reject and pending[0] in {"task_preview", "report_preview", "done_match_preview"}:
+        kind, ref = pending
+        with SessionLocal() as db:
+            if kind == "task_preview":
+                drafts = db.scalars(
+                    select(Task).where(
+                        Task.batch_id == ref,
+                        Task.user_id == user.id,
+                        Task.status == "draft",
+                    )
+                ).all()
+                for item in drafts:
+                    db.delete(item)
+            elif kind == "report_preview":
+                try:
+                    report_id = int(ref)
+                except Exception:
+                    report_id = 0
+                report = db.get(WorkReport, report_id) if report_id else None
+                if report and report.user_id == user.id and report.status == "draft":
+                    db.delete(report)
+            elif kind == "done_match_preview":
+                try:
+                    payload = json.loads(ref)
+                    report_ids = [int(x) for x in payload.get("r", [])]
+                except Exception:
+                    report_ids = []
+                if report_ids:
+                    drafts = db.scalars(
+                        select(WorkReport).where(
+                            WorkReport.user_id == user.id,
+                            WorkReport.id.in_(report_ids),
+                            WorkReport.status == "draft_match",
+                        )
+                    ).all()
+                    for item in drafts:
+                        db.delete(item)
+            db.commit()
+        _clear_pending(user.id)
+        pending = None
     if pending and pending[0] in {"task_edit", "report_edit"}:
         if from_voice:
             handled = await _replace_edit_from_voice(
