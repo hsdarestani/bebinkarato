@@ -340,6 +340,102 @@ Schema:
             "unmatched_reports": unmatched,
         }
 
+    async def refine_completed_task_selection(
+        self,
+        instruction: str,
+        current_task_ids: list[int],
+        open_tasks: list[dict],
+        timezone_name: str,
+    ) -> list[int]:
+        if not open_tasks:
+            return []
+
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        now = datetime.now(tz)
+
+        valid_ids = set()
+        payload_tasks = []
+        for task in open_tasks[:30]:
+            try:
+                task_id = int(task.get("id"))
+            except Exception:
+                continue
+            valid_ids.add(task_id)
+            payload_tasks.append({
+                "id": task_id,
+                "title": str(task.get("title") or ""),
+                "notes": str(task.get("notes") or ""),
+                "project": str(task.get("project") or ""),
+                "original_text": str(task.get("original_text") or ""),
+                "currently_selected": task_id in current_task_ids,
+            })
+
+        system = """تو ویرایشگر مجموعه کارهای انجام‌شده هستی.
+کاربر قبلاً یک پیش‌نمایش از Taskهایی که احتمالاً انجام داده دیده و حالا با زبان محاوره‌ای دارد همان مجموعه را اصلاح می‌کند.
+
+باید در خروجی، کل مجموعه نهایی Taskهای انجام‌شده را برگردانی، نه فقط تغییر جدید را.
+
+مثال‌ها:
+- انتخاب فعلی: [خرید موز، جلسه با بهنود]
+  کاربر: «درسته، باشگاه هم رفتم»
+  خروجی نهایی باید هر سه مورد را شامل شود.
+- انتخاب فعلی: [باشگاه، خرید موز، جلسه]
+  کاربر: «موز رو انجام ندادم»
+  خروجی نهایی فقط باشگاه و جلسه است.
+- کاربر: «فقط باشگاه و جلسه»
+  خروجی نهایی دقیقاً همان دو مورد است.
+- کاربر: «همه‌ش درسته»
+  انتخاب فعلی بدون تغییر بماند.
+- کاربر: «جلسه هم انجام شد»
+  جلسه به انتخاب فعلی اضافه شود.
+
+قوانین:
+1. معنایی بفهم، نه صرفاً تطابق کلمه.
+2. فقط IDهایی را برگردان که در open_tasks هستند.
+3. اگر کاربر گفت «هم»، معمولاً یعنی انتخاب فعلی را نگه دار و مورد جدید را اضافه کن.
+4. اگر گفت «نه»، «انجام ندادم»، «بردار»، مورد مربوط را حذف کن و بقیه را نگه دار.
+5. اگر گفت «فقط»، انتخاب قبلی را با مواردی که گفته جایگزین کن.
+6. اگر حرفش صرفاً تأیید بود، انتخاب فعلی را همان‌طور نگه دار.
+7. چیزی را از خودت اضافه نکن.
+8. فقط JSON معتبر برگردان.
+
+Schema:
+{"selected_task_ids":[1,2,3]}"""
+
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps({
+                        "now": now.isoformat(),
+                        "timezone": timezone_name,
+                        "current_selected_task_ids": current_task_ids,
+                        "open_tasks": payload_tasks,
+                        "user_correction": instruction,
+                    }, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": 500,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        selected = []
+        seen = set()
+        for raw_id in obj.get("selected_task_ids") or []:
+            try:
+                task_id = int(raw_id)
+            except Exception:
+                continue
+            if task_id in valid_ids and task_id not in seen:
+                selected.append(task_id)
+                seen.add(task_id)
+        return selected
+
     async def parse_report(self, text: str, timezone_name: str, language_code: str = "fa") -> dict:
         try:
             tz = ZoneInfo(timezone_name)
