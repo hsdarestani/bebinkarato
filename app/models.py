@@ -120,3 +120,15 @@ class PendingAction(Base):
     kind: Mapped[str] = mapped_column(String(32), default="")
     ref: Mapped[str] = mapped_column(String(120), default="")
     updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+
+
+class AgentDraft(Base):
+    __tablename__ = "agent_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
+    updated_at: Mapped[str] = mapped_column(String(40), default=utc_now_iso)
