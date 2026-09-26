@@ -51,6 +51,10 @@ jobs:
             cd /opt/bebinkarato/app
             git fetch origin main
             git reset --hard origin/main
+
+            # ONE-TIME TEST DATA RESET requested by owner.
+            docker compose down --remove-orphans || true
+            rm -rf data
             mkdir -p data
 
             umask 077
