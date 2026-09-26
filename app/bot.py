@@ -317,6 +317,59 @@ async def _create_task_preview(update: Update, user: User, text: str, voice_seco
     await msg.edit_text(preview, reply_markup=task_preview_keyboard(batch_id))
 
 
+def _normalize_fa(text: str) -> str:
+    value = (text or "").lower()
+    value = value.replace("ي", "ی").replace("ك", "ک").replace("ۀ", "ه")
+    value = re.sub(r"[ـ‌\u200c]", " ", value)
+    value = re.sub(r"[^\w\sآ-ی]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _completion_refers_to_existing_tasks(text: str) -> bool:
+    n = _normalize_fa(text)
+    return bool(re.search(
+        r"(تسک|کار(?:ا|ها)?(?:ی)?\s*(?:قبلی|بالا|همون)|همون\s+(?:سه|دو|چند|کار)|"
+        r"اونا\s+رو\s+انجام\s+دادم|این(?:ا|ها)\s+رو\s+انجام\s+دادم|"
+        r"همه(?:شون|ش)\s+رو\s+انجام\s+دادم)",
+        n,
+    ))
+
+
+def _local_completed_task_matches(text: str, tasks: list[dict]) -> list[int]:
+    n = _normalize_fa(text)
+    stop = {
+        "را","رو","به","با","از","در","برای","یه","یک","این","اون","همون","و","که",
+        "کردم","کرده","انجام","دادم","رفتم","خریدم","گرفتم","تموم","تمام","شد","شده",
+        "باید","کنم","کنید","کن","برم","بخرم","برگزار","راست","درست",
+    }
+    input_tokens = {t for t in n.split() if len(t) >= 2 and t not in stop}
+    if not input_tokens:
+        return []
+
+    matches = []
+    for task in tasks:
+        task_text = " ".join([
+            str(task.get("title") or ""),
+            str(task.get("project") or ""),
+            str(task.get("notes") or ""),
+        ])
+        tn = _normalize_fa(task_text)
+        task_tokens = {t for t in tn.split() if len(t) >= 2 and t not in stop}
+        overlap = input_tokens & task_tokens
+        if not overlap:
+            continue
+
+        # محافظه‌کارانه: یک واژه شاخص بلند یا حداقل دو واژه مشترک.
+        strong = any(len(t) >= 4 for t in overlap)
+        if strong or len(overlap) >= 2:
+            try:
+                matches.append(int(task["id"]))
+            except Exception:
+                pass
+    return matches[:10]
+
+
 async def _create_completion_match_preview(
     update: Update,
     user: User,
@@ -342,19 +395,38 @@ async def _create_completion_match_preview(
             for task in open_tasks
         ]
 
-    if not task_payloads or not _quota_ok(user, voice_seconds):
+    if not task_payloads:
         return False
 
-    try:
-        matched = await ai.match_completed_tasks(text, task_payloads, IRAN_TZ)
-        _charge_usage(user.id, voice_seconds)
-    except Exception as exc:
-        print(f"Completion matching error: {exc}")
-        return False
+    force_existing = _completion_refers_to_existing_tasks(text)
+    matched = {"matched_task_ids": [], "unmatched_reports": []}
+
+    if _quota_ok(user, voice_seconds):
+        try:
+            matched = await ai.match_completed_tasks(text, task_payloads, IRAN_TZ)
+            _charge_usage(user.id, voice_seconds)
+        except Exception as exc:
+            print(f"Completion matching error: {exc}")
 
     matched_ids = [int(x) for x in (matched.get("matched_task_ids") or [])]
     unmatched = matched.get("unmatched_reports") or []
+
     if not matched_ids:
+        matched_ids = _local_completed_task_matches(text, task_payloads)
+
+    if not matched_ids:
+        if force_existing:
+            lines = [
+                "فهمیدم داری درباره کارای قبلیت حرف می‌زنی، ولی دقیق نتونستم تشخیص بدم کدوما رو می‌گی.",
+                "",
+                "کارای بازت ایناست 👇",
+            ]
+            for i, task in enumerate(task_payloads[:12], start=1):
+                lines.append(f"{fa_num(i)}. {task['title']}")
+            lines.append("")
+            lines.append("مثلاً بگو «۲ و ۳ رو انجام دادم» یا اسم کارها رو بگو.")
+            await update.effective_message.reply_text("\n".join(lines))
+            return True
         return False
 
     with SessionLocal() as db:
