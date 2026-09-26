@@ -179,9 +179,19 @@ Schema:
         now = datetime.now(ZoneInfo(timezone_name))
         system = """تو ویرایشگر برنامه فارسی هستی.
 یک برنامه موجود و درخواست اصلاح کاربر را می‌گیری و فقط همان تغییر خواسته‌شده را اعمال می‌کنی.
-همه متن‌های خروجی فارسی باشند. چیزی را بی‌دلیل اضافه نکن.
-due_at فقط اگر کاربر صریحاً مهلت داده باشد.
-خروجی فقط JSON معتبر با همان Schema قبلی."""
+
+قوانین:
+1. همه title، notes و project فارسی باشند؛ مگر اسم خاصی که خود کاربر انگلیسی گفته باشد.
+2. چیزی را بی‌دلیل اضافه نکن و کار جدید اختراع نکن.
+3. اگر کاربر گفت یک مورد حذف شود، آن مورد را از خروجی حذف کن.
+4. due_at فقط وقتی باشد که کاربر صریحاً مهلت داده باشد.
+5. scheduled_at زمان پیشنهادی برنامه است و می‌تواند null باشد.
+6. priority فقط low, medium, high, urgent.
+7. تمام کارهای نهایی، حتی کارهایی که تغییر نکرده‌اند، باید در خروجی برگردند.
+8. فقط JSON معتبر برگردان.
+
+Schema دقیق:
+{"tasks":[{"title":"فارسی","notes":"فارسی","project":"فارسی یا خالی","priority":"medium","estimated_minutes":30,"due_at":null,"due_source":"explicit|none","scheduled_at":null,"reminder_at":null}]}"""
         result = await self._run(
             settings.cloudflare_llm_model,
             {
