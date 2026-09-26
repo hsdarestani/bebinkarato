@@ -169,6 +169,16 @@ def report_preview_keyboard(report_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def done_match_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ آره، انجام شدن", callback_data="done_match_confirm|pending"),
+            InlineKeyboardButton("✏️ نه، اصلاحش کنیم", callback_data="done_match_edit|pending"),
+        ],
+        [InlineKeyboardButton("🗑 بیخیال", callback_data="done_match_discard|pending")],
+    ])
+
+
 def _task_payload(task: Task) -> dict:
     return {
         "title": task.title,
@@ -305,6 +315,120 @@ async def _create_task_preview(update: Update, user: User, text: str, voice_seco
 
     _set_pending(user.id, "task_preview", batch_id)
     await msg.edit_text(preview, reply_markup=task_preview_keyboard(batch_id))
+
+
+async def _create_completion_match_preview(
+    update: Update,
+    user: User,
+    text: str,
+    source: str,
+    voice_seconds: int = 0,
+) -> bool:
+    with SessionLocal() as db:
+        open_tasks = db.scalars(
+            select(Task)
+            .where(Task.user_id == user.id, Task.status.in_(["todo", "doing"]))
+            .order_by(Task.created_at.desc())
+            .limit(30)
+        ).all()
+        task_payloads = [
+            {
+                "id": task.id,
+                "title": task.title,
+                "notes": task.notes,
+                "project": task.project,
+                "original_text": task.original_text,
+            }
+            for task in open_tasks
+        ]
+
+    if not task_payloads or not _quota_ok(user, voice_seconds):
+        return False
+
+    try:
+        matched = await ai.match_completed_tasks(text, task_payloads, IRAN_TZ)
+        _charge_usage(user.id, voice_seconds)
+    except Exception as exc:
+        print(f"Completion matching error: {exc}")
+        return False
+
+    matched_ids = [int(x) for x in (matched.get("matched_task_ids") or [])]
+    unmatched = matched.get("unmatched_reports") or []
+    if not matched_ids:
+        return False
+
+    with SessionLocal() as db:
+        matched_tasks = db.scalars(
+            select(Task)
+            .where(
+                Task.user_id == user.id,
+                Task.id.in_(matched_ids),
+                Task.status.in_(["todo", "doing"]),
+            )
+            .order_by(Task.id)
+        ).all()
+        valid_ids = [task.id for task in matched_tasks]
+        if not valid_ids:
+            return False
+
+        unmatched_report_ids = []
+        for item in unmatched[:5]:
+            report = WorkReport(
+                user_id=user.id,
+                title=item.get("title") or "گزارش کار",
+                summary=item.get("summary") or item.get("title") or "",
+                project=item.get("project") or "",
+                category=item.get("category") or "کار",
+                duration_minutes=item.get("duration_minutes"),
+                work_date=item.get("work_date") or today_gregorian(),
+                source=source,
+                original_text=text,
+                status="draft_match",
+            )
+            db.add(report)
+            db.flush()
+            unmatched_report_ids.append(report.id)
+        db.commit()
+
+        lines = ["از حرفت فهمیدم این کارای قبلیت انجام شدن 👇", ""]
+        for task in matched_tasks:
+            lines.append(f"✅ {task.title}")
+        if unmatched_report_ids:
+            reports = db.scalars(
+                select(WorkReport).where(WorkReport.id.in_(unmatched_report_ids)).order_by(WorkReport.id)
+            ).all()
+            lines.append("")
+            lines.append("این‌ها هم کار جدید بودن و جدا گزارششون می‌کنم:")
+            for report in reports:
+                lines.append(f"➕ {report.title}")
+
+    ref = json.dumps(
+        {"t": valid_ids, "r": unmatched_report_ids},
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    if len(ref) > 120:
+        with SessionLocal() as db:
+            drafts = db.scalars(
+                select(WorkReport).where(
+                    WorkReport.id.in_(unmatched_report_ids),
+                    WorkReport.user_id == user.id,
+                    WorkReport.status == "draft_match",
+                )
+            ).all()
+            for report in drafts:
+                db.delete(report)
+            db.commit()
+        return False
+
+    _set_pending(user.id, "done_match_preview", ref)
+    lines.append("")
+    lines.append("همین‌ها رو انجام‌شده بزنم؟")
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=done_match_keyboard(),
+    )
+    return True
 
 
 async def _create_report_preview(
@@ -791,7 +915,16 @@ async def route_text(
     elif intent == "reports":
         await my_reports(update, context)
     elif intent == "report":
-        await _create_report_preview(update, context, user, text, "voice" if voice_seconds else "text", voice_seconds)
+        source = "voice" if voice_seconds else "text"
+        matched_existing = await _create_completion_match_preview(
+            update,
+            user,
+            text,
+            source,
+            voice_seconds,
+        )
+        if not matched_existing:
+            await _create_report_preview(update, context, user, text, source, voice_seconds)
     elif intent == "plan":
         await _create_task_preview(update, user, text, voice_seconds)
     else:
@@ -896,6 +1029,121 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     user = _upsert_user(update)
     action, _, value = (query.data or "").partition("|")
+
+    if action in {"done_match_confirm", "done_match_edit", "done_match_discard"}:
+        pending = _get_pending(user.id)
+        if not pending or pending[0] != "done_match_preview":
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("این پیشنهاد دیگه معتبر نیست. دوباره عادی بگو کدوما رو انجام دادی.")
+            return
+
+        try:
+            payload = json.loads(pending[1])
+            task_ids = [int(x) for x in payload.get("t", [])]
+            report_ids = [int(x) for x in payload.get("r", [])]
+        except Exception:
+            _clear_pending(user.id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("یه مشکلی توی این پیشنهاد پیش اومد. دوباره بگو کدوما رو انجام دادی.")
+            return
+
+        if action == "done_match_edit":
+            with SessionLocal() as db:
+                drafts = db.scalars(
+                    select(WorkReport).where(
+                        WorkReport.user_id == user.id,
+                        WorkReport.id.in_(report_ids),
+                        WorkReport.status == "draft_match",
+                    )
+                ).all() if report_ids else []
+                for report in drafts:
+                    db.delete(report)
+                db.commit()
+            _clear_pending(user.id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "اوکی، از نو بگو دقیقاً کدوما رو انجام دادی؛ خیلی عادی بگو، خودم با کارای بازت تطبیق می‌دم."
+            )
+            return
+
+        if action == "done_match_discard":
+            with SessionLocal() as db:
+                drafts = db.scalars(
+                    select(WorkReport).where(
+                        WorkReport.user_id == user.id,
+                        WorkReport.id.in_(report_ids),
+                        WorkReport.status == "draft_match",
+                    )
+                ).all() if report_ids else []
+                for report in drafts:
+                    db.delete(report)
+                db.commit()
+            _clear_pending(user.id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("اوکی، هیچ‌کدوم رو ثبت نکردم.")
+            return
+
+        completed_titles = []
+        with SessionLocal() as db:
+            tasks = db.scalars(
+                select(Task).where(
+                    Task.user_id == user.id,
+                    Task.id.in_(task_ids),
+                    Task.status.in_(["todo", "doing"]),
+                )
+            ).all() if task_ids else []
+
+            for task in tasks:
+                task.status = "done"
+                task.updated_at = utc_now_iso()
+                completed_titles.append(task.title)
+
+                existing = db.scalar(
+                    select(WorkReport).where(
+                        WorkReport.user_id == user.id,
+                        WorkReport.task_id == task.id,
+                        WorkReport.status == "submitted",
+                    )
+                )
+                if existing is None:
+                    db.add(WorkReport(
+                        user_id=user.id,
+                        task_id=task.id,
+                        title=task.title,
+                        summary=task.notes or task.title,
+                        project=task.project or "",
+                        category="کار انجام‌شده",
+                        duration_minutes=None,
+                        work_date=today_gregorian(),
+                        source="تطبیق با کار قبلی",
+                        original_text=task.original_text or task.title,
+                        status="submitted",
+                    ))
+
+            if report_ids:
+                drafts = db.scalars(
+                    select(WorkReport).where(
+                        WorkReport.user_id == user.id,
+                        WorkReport.id.in_(report_ids),
+                        WorkReport.status == "draft_match",
+                    )
+                ).all()
+                for report in drafts:
+                    report.status = "submitted"
+                    report.updated_at = utc_now_iso()
+
+            db.commit()
+
+        _clear_pending(user.id)
+        await query.edit_message_reply_markup(reply_markup=None)
+        count = len(completed_titles)
+        if count:
+            await query.message.reply_text(
+                f"اوکی شد 👌 {fa_num(count)} تا کار رو انجام‌شده زدم و هرکدوم جدا رفت تو گزارش کارت."
+            )
+        else:
+            await query.message.reply_text("اوکی، گزارش‌های جدیدت ثبت شدن.")
+        return
 
     if action == "task_confirm":
         with SessionLocal() as db:
