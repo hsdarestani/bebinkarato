@@ -237,6 +237,109 @@ Schema دقیق:
             raise AIError("Invalid revised task list.")
         return self._clean_tasks(tasks_out, timezone_name)
 
+    async def match_completed_tasks(
+        self,
+        text: str,
+        open_tasks: list[dict],
+        timezone_name: str,
+    ) -> dict:
+        if not open_tasks:
+            return {"matched_task_ids": [], "unmatched_reports": []}
+
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        now = datetime.now(tz)
+
+        system = """تو مسئول تطبیق گزارش کار فارسی با Taskهای باز کاربر هستی.
+کاربر ممکن است خیلی محاوره‌ای بگوید چه کارهایی را انجام داده. باید بررسی کنی آیا هر بخش از حرفش همان یکی از Taskهای باز است یا یک کار جدید و مستقل.
+
+قوانین سخت:
+1. تطبیق باید معنایی باشد، نه صرفاً کلمه‌به‌کلمه. مثال: Task «رفتن به باشگاه» با «باشگاهو رفتم» یکی است.
+2. فقط وقتی task_id را match کن که از متن کاربر واقعاً معلوم باشد آن کار انجام شده.
+3. Taskی که کاربر درباره انجام شدنش حرف نزده را match نکن.
+4. اگر بخشی از گزارش با هیچ Task بازی تطبیق ندارد، آن را در unmatched_reports به صورت یک گزارش جدا برگردان.
+5. یک گزارش چندکار را به یک عنوان ترکیبی تبدیل نکن. هر کار مستقل باید جدا باشد.
+6. تمام title، summary، project و category فارسی باشند.
+7. duration_minutes فقط وقتی عدد داشته باشد که کاربر زمان را صریحاً گفته باشد.
+8. work_date اگر کاربر تاریخ نگفته، امروز به وقت ایران است.
+9. حداکثر 10 Task را match کن و حداکثر 5 گزارش جدید بساز.
+10. فقط JSON معتبر برگردان.
+
+Schema:
+{
+  "matched_task_ids":[1,2],
+  "unmatched_reports":[
+    {
+      "title":"فارسی",
+      "summary":"فارسی",
+      "project":"",
+      "category":"کار",
+      "duration_minutes":null,
+      "work_date":"YYYY-MM-DD"
+    }
+  ]
+}"""
+
+        payload_tasks = []
+        valid_ids = set()
+        for task in open_tasks[:30]:
+            try:
+                task_id = int(task.get("id"))
+            except Exception:
+                continue
+            valid_ids.add(task_id)
+            payload_tasks.append({
+                "id": task_id,
+                "title": str(task.get("title") or ""),
+                "notes": str(task.get("notes") or ""),
+                "project": str(task.get("project") or ""),
+                "original_text": str(task.get("original_text") or ""),
+            })
+
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps({
+                        "now": now.isoformat(),
+                        "timezone": timezone_name,
+                        "user_report": text,
+                        "open_tasks": payload_tasks,
+                    }, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": 1200,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+
+        matched = []
+        seen = set()
+        for raw_id in obj.get("matched_task_ids") or []:
+            try:
+                task_id = int(raw_id)
+            except Exception:
+                continue
+            if task_id in valid_ids and task_id not in seen:
+                matched.append(task_id)
+                seen.add(task_id)
+            if len(matched) >= 10:
+                break
+
+        unmatched = []
+        for item in (obj.get("unmatched_reports") or [])[:5]:
+            if isinstance(item, dict):
+                unmatched.append(self._clean_report(item, text, now))
+
+        return {
+            "matched_task_ids": matched,
+            "unmatched_reports": unmatched,
+        }
+
     async def parse_report(self, text: str, timezone_name: str, language_code: str = "fa") -> dict:
         try:
             tz = ZoneInfo(timezone_name)
