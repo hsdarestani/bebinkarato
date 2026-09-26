@@ -5,9 +5,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.ai import CloudflareAI
+from app.bot import _simple_replacement, _simple_delete_index, _deadline_was_explicit
 
 
 async def main() -> None:
+    assert _simple_replacement("پاساژ نه باشگاه") == ("پاساژ", "باشگاه")
+    assert _simple_replacement("میگم پاساژ نه باشگاه") == ("پاساژ", "باشگاه")
+    assert _simple_delete_index("دومی رو حذف کن") == 1
+    assert not _deadline_was_explicit("امروز چند تا کار دارم انجام بدم")
+    assert _deadline_was_explicit("این کار باید تا فردا تموم بشه")
+
     ai = CloudflareAI()
     try:
         await ai._resolve_account_id()
