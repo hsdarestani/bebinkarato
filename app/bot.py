@@ -1489,6 +1489,30 @@ async def route_text(
     user = _upsert_user(update)
     pending = _get_pending(user.id)
 
+    if pending and pending[0] == "agent_edit":
+        handled = await _revise_agent_preview(
+            update,
+            user,
+            text,
+            pending,
+            voice_seconds=voice_seconds,
+        )
+        if handled:
+            return
+
+    if pending and pending[0] == "agent_preview":
+        correction = _normalize_fa(text)
+        if re.match(r"^(نه|نخیر|منظورم|میگم|می گم|اصلاح|عوض|فقط|اون|این)", correction):
+            handled = await _revise_agent_preview(
+                update,
+                user,
+                text,
+                ("agent_edit", pending[1]),
+                voice_seconds=voice_seconds,
+            )
+            if handled:
+                return
+
     # کاربر لازم نیست برای رد کردن پیش‌نمایش حتماً دکمه بزند.
     # «نه...»، «منظورم...»، «میگم...» یعنی پیش‌نمایش قبلی را کنار بگذار و حرف جدید را بفهم.
     # اگر روی پیش‌نمایش «کارهای انجام‌شده» هستیم، هر اصلاح طبیعی را روی همان مجموعه اعمال کن.
@@ -1551,6 +1575,15 @@ async def route_text(
             handled = await _handle_edit_text(update, user, text, pending)
         if handled:
             return
+
+    handled_by_agent = await _run_planning_agent(
+        update,
+        user,
+        text,
+        voice_seconds=voice_seconds,
+    )
+    if handled_by_agent:
+        return
 
     try:
         intent = await ai.classify_intent(text, IRAN_TZ)
@@ -1681,6 +1714,59 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     user = _upsert_user(update)
     action, _, value = (query.data or "").partition("|")
+
+    if action in {"agent_confirm", "agent_edit", "agent_discard"}:
+        try:
+            draft_id = int(value)
+        except Exception:
+            await query.message.reply_text("این پیش‌نمایش دیگه معتبر نیست.")
+            return
+
+        with SessionLocal() as db:
+            draft = db.get(AgentDraft, draft_id)
+            valid = bool(draft and draft.user_id == user.id and draft.status == "draft")
+
+        if not valid:
+            _clear_pending(user.id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("این پیش‌نمایش دیگه معتبر نیست. دستور رو دوباره بگو.")
+            return
+
+        if action == "agent_edit":
+            _set_pending(user.id, "agent_edit", str(draft_id))
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "بگو چی رو عوض کنم؛ خیلی عادی بگو. مثلاً «اولی رو بذار ساعت ۵»، «اون یکی رو حذف نکن»، یا «فردا رو سبک‌تر بچین»."
+            )
+            return
+
+        if action == "agent_discard":
+            with SessionLocal() as db:
+                draft = db.get(AgentDraft, draft_id)
+                if draft and draft.user_id == user.id:
+                    draft.status = "discarded"
+                    draft.updated_at = utc_now_iso()
+                    db.commit()
+            _clear_pending(user.id)
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("اوکی، هیچ تغییری ندادم 👌")
+            return
+
+        created, updated, deleted, completed = _apply_agent_draft(user.id, draft_id)
+        _clear_pending(user.id)
+        await query.edit_message_reply_markup(reply_markup=None)
+        bits = []
+        if created:
+            bits.append(f"{fa_num(created)} کار جدید")
+        if updated:
+            bits.append(f"{fa_num(updated)} تغییر")
+        if completed:
+            bits.append(f"{fa_num(completed)} انجام‌شده")
+        if deleted:
+            bits.append(f"{fa_num(deleted)} حذف")
+        summary = "، ".join(bits) if bits else "تغییری"
+        await query.message.reply_text(f"اوکی شد 👌 {summary} روی برنامه‌ت اعمال شد.")
+        return
 
     if action in {"done_match_confirm", "done_match_edit", "done_match_discard"}:
         pending = _get_pending(user.id)
