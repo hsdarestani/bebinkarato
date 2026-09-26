@@ -336,6 +336,61 @@ def _completion_refers_to_existing_tasks(text: str) -> bool:
     ))
 
 
+def _meaningful_tokens(text: str) -> set[str]:
+    stop = {
+        "را","رو","به","با","از","در","برای","یه","یک","این","اون","همون","و","که","هم",
+        "کردم","کرده","انجام","دادم","رفتم","خریدم","گرفتم","تموم","تمام","شد","شده",
+        "باید","کنم","کنید","کن","برم","بخرم","برگزار","راست","درست","کار","گزارش",
+    }
+    return {
+        token for token in _normalize_fa(text).split()
+        if len(token) >= 3 and token not in stop
+    }
+
+
+def _texts_semantically_overlap(a: str, b: str) -> bool:
+    left = _meaningful_tokens(a)
+    right = _meaningful_tokens(b)
+    if not left or not right:
+        return False
+    for x in left:
+        for y in right:
+            if x == y:
+                return True
+            if len(x) >= 3 and len(y) >= 3 and (x in y or y in x):
+                return True
+    return False
+
+
+def _filter_unmatched_reports(
+    user_text: str,
+    unmatched: list[dict],
+    matched_tasks: list[Task],
+) -> list[dict]:
+    clean = []
+    matched_texts = [
+        " ".join(filter(None, [task.title, task.notes, task.project]))
+        for task in matched_tasks
+    ]
+    for item in unmatched[:5]:
+        candidate_text = " ".join(filter(None, [
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            str(item.get("project") or ""),
+        ]))
+
+        # گزارش جدید باید واقعاً از همین پیام فعلی کاربر آمده باشد.
+        if not _texts_semantically_overlap(candidate_text, user_text):
+            continue
+
+        # اگر همان کاری است که همین الان به یک Task باز Match شده، دوباره گزارش مستقل نساز.
+        if any(_texts_semantically_overlap(candidate_text, task_text) for task_text in matched_texts):
+            continue
+
+        clean.append(item)
+    return clean
+
+
 def _local_completed_task_matches(text: str, tasks: list[dict]) -> list[int]:
     n = _normalize_fa(text)
     stop = {
@@ -450,6 +505,8 @@ async def _create_completion_match_preview(
         valid_ids = [task.id for task in matched_tasks]
         if not valid_ids:
             return False
+
+        unmatched = _filter_unmatched_reports(text, unmatched, matched_tasks)
 
         unmatched_report_ids = []
         for item in unmatched[:5]:
@@ -1165,6 +1222,8 @@ async def route_text(
 
     if intent == "today":
         await today(update, context)
+    elif intent == "today_reports":
+        await today_reports(update, context)
     elif intent == "upcoming":
         await upcoming(update, context)
     elif intent == "reports":
@@ -1544,6 +1603,87 @@ async def upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             line += f" — {local_datetime(task.scheduled_at or task.due_at)}"
         lines.append(line)
     await update.effective_message.reply_text("\n".join(lines))
+
+
+async def today_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = _upsert_user(update)
+    today_value = today_gregorian()
+
+    with SessionLocal() as db:
+        reports = db.scalars(
+            select(WorkReport)
+            .where(
+                WorkReport.user_id == user.id,
+                WorkReport.status == "submitted",
+                WorkReport.work_date == today_value,
+            )
+            .order_by(WorkReport.created_at.asc())
+        ).all()
+
+        # داده‌های قدیمیِ ساخته‌شده با باگ قبلی را در خروجی امروز تکراری نشان نده.
+        task_linked = [r for r in reports if r.task_id is not None]
+        filtered = []
+        seen_titles = []
+        for report in reports:
+            report_text = " ".join(filter(None, [report.title, report.summary, report.project]))
+
+            # گزارش‌های بدون Task اگر حتی به متن اصلی خودشان هم ربطی ندارند، hallucination قدیمی‌اند.
+            if report.task_id is None and report.original_text:
+                if not _texts_semantically_overlap(report_text, report.original_text):
+                    continue
+
+            # اگر یک گزارش مستقل عملاً همان Task انجام‌شده است، فقط نسخه Task-linked را نگه دار.
+            if report.task_id is None and any(
+                _texts_semantically_overlap(
+                    report_text,
+                    " ".join(filter(None, [linked.title, linked.summary, linked.project]))
+                )
+                for linked in task_linked
+            ):
+                continue
+
+            # تکراری‌های واضح را هم یک بار نشان بده.
+            if any(_texts_semantically_overlap(report_text, prev) for prev in seen_titles):
+                # فقط وقتی تقریباً یک عنوان‌اند حذف شود؛ گزارش‌های متفاوت با واژه مشترک نگه داشته می‌شوند.
+                norm_title = _normalize_fa(report.title)
+                if any(norm_title == _normalize_fa(prev_title) for prev_title in seen_titles):
+                    continue
+            filtered.append(report)
+            seen_titles.append(report.title)
+
+        rows = [(r, len(r.attachments)) for r in filtered]
+
+    today_label = jalali_date(today_value)
+    if not rows:
+        await update.effective_message.reply_text(
+            f"برای امروز {today_label} هنوز چیزی به‌عنوان انجام‌شده ثبت نکردی."
+        )
+        return
+
+    total_minutes = sum((r.duration_minutes or 0) for r, _ in rows)
+    parts = [f"امروز تا الان اینا رو جمع کردیم 👇", ""]
+    for report, attachment_count in rows:
+        line = f"✅ {report.title}"
+        if report.project:
+            line += f" · {report.project}"
+        if report.duration_minutes:
+            line += f" · {fa_num(report.duration_minutes)} دقیقه"
+        if attachment_count:
+            line += f" · 📎 {fa_num(attachment_count)}"
+        parts.append(line)
+
+    parts.append("")
+    parts.append(f"جمعاً {fa_num(len(rows))} کار ثبت‌شده")
+    if total_minutes:
+        hours, minutes = divmod(total_minutes, 60)
+        if hours and minutes:
+            parts.append(f"⏱ زمان ثبت‌شده: {fa_num(hours)} ساعت و {fa_num(minutes)} دقیقه")
+        elif hours:
+            parts.append(f"⏱ زمان ثبت‌شده: {fa_num(hours)} ساعت")
+        else:
+            parts.append(f"⏱ زمان ثبت‌شده: {fa_num(minutes)} دقیقه")
+
+    await update.effective_message.reply_text("\n".join(parts))
 
 
 async def my_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
