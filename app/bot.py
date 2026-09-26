@@ -197,28 +197,41 @@ def _report_payload(report: WorkReport) -> dict:
 def render_task_preview(tasks: list[Task]) -> str:
     if not tasks:
         return "چیزی برای ثبت پیدا نکردم."
-    lines = ["این چیزیه که از حرفت فهمیدم 👇"]
+    lines = []
+    first = tasks[0]
+    if first.source == "voice" and first.original_text:
+        heard = first.original_text.strip().replace("\n", " ")
+        if len(heard) > 450:
+            heard = heard[:447] + "..."
+        lines.extend(["از ویست اینو شنیدم 🎙", f"«{heard}»", ""])
+    lines.append("اینم چیزیه که ازش فهمیدم 👇")
     for i, task in enumerate(tasks, start=1):
         line = f"\n{fa_num(i)}. {task.title}"
         if task.project:
             line += f"\n   📁 {task.project}"
         if task.scheduled_at:
-            line += f"\n   🗓 {local_datetime(task.scheduled_at)}"
+            line += f"\n   🗓 پیشنهاد من: {local_datetime(task.scheduled_at)}"
         if task.due_at:
-            line += f"\n   ⏳ مهلت: {local_datetime(task.due_at)}"
+            line += f"\n   ⏳ ددلاین خودت: {local_datetime(task.due_at)}"
         if task.estimated_minutes:
-            line += f"\n   ⏱ حدود {fa_num(task.estimated_minutes)} دقیقه"
+            line += f"\n   ⏱ تخمین من: حدود {fa_num(task.estimated_minutes)} دقیقه"
         lines.append(line)
-    lines.append("\nاگه یه جاش درست نیست، «ویرایشش کن» رو بزن و همونجوری که راحتی بگو چی عوض شه.")
+    lines.append("\nاگه حتی یه کلمه‌شم غلطه، «ویرایشش کن» رو بزن و خیلی عادی بگو چی عوض شه.")
     return "\n".join(lines)
 
 
 def render_report_preview(report: WorkReport) -> str:
-    lines = [
+    lines = []
+    if report.source == "voice" and report.original_text:
+        heard = report.original_text.strip().replace("\n", " ")
+        if len(heard) > 450:
+            heard = heard[:447] + "..."
+        lines.extend(["از ویست اینو شنیدم 🎙", f"«{heard}»", ""])
+    lines.extend([
         "این گزارشیه که از حرفت فهمیدم 👇",
         "",
         f"✅ {report.title}",
-    ]
+    ])
     if report.summary and report.summary != report.title:
         lines.append(f"📝 {report.summary}")
     if report.project:
