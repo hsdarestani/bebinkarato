@@ -15,7 +15,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from app.ai import AIError, CloudflareAI
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import PendingAction, ReportAttachment, Task, User, WorkReport, utc_now_iso
+from app.models import AgentDraft, PendingAction, ReportAttachment, Task, User, WorkReport, utc_now_iso
 
 settings = get_settings()
 ai = CloudflareAI()
@@ -177,6 +177,344 @@ def done_match_keyboard() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("🗑 بیخیال", callback_data="done_match_discard|pending")],
     ])
+
+
+def agent_preview_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ انجامش بده", callback_data=f"agent_confirm|{draft_id}"),
+            InlineKeyboardButton("✏️ یه چیزیشو عوض کن", callback_data=f"agent_edit|{draft_id}"),
+        ],
+        [InlineKeyboardButton("🗑 بیخیال", callback_data=f"agent_discard|{draft_id}")],
+    ])
+
+
+def _planning_task_payload(task: Task) -> dict:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "notes": task.notes,
+        "project": task.project,
+        "priority": task.priority,
+        "estimated_minutes": task.estimated_minutes,
+        "status": task.status,
+        "scheduled_at": task.scheduled_at,
+        "due_at": task.due_at,
+        "due_source": task.due_source,
+        "original_text": task.original_text,
+    }
+
+
+def _agent_open_tasks(user_id: int) -> list[dict]:
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(Task)
+            .where(Task.user_id == user_id, Task.status.in_(["todo", "doing"]))
+            .order_by(Task.created_at.asc())
+            .limit(100)
+        ).all()
+        return [_planning_task_payload(task) for task in tasks]
+
+
+def _priority_fa(value: str) -> str:
+    return {
+        "low": "کم",
+        "medium": "معمولی",
+        "high": "زیاد",
+        "urgent": "فوری",
+    }.get(value, value)
+
+
+def _render_agent_preview(user_id: int, payload: dict) -> str:
+    operations = payload.get("operations") or []
+    if not operations:
+        return "تغییری برای انجام دادن پیدا نکردم."
+
+    with SessionLocal() as db:
+        ids = [int(op["task_id"]) for op in operations if op.get("task_id") is not None]
+        tasks = db.scalars(
+            select(Task).where(Task.user_id == user_id, Task.id.in_(ids))
+        ).all() if ids else []
+        by_id = {task.id: task for task in tasks}
+
+    lines = ["این تغییرات رو روی برنامه‌ت انجام بدم؟ 👇", ""]
+    for op in operations:
+        kind = op.get("type")
+        if kind == "create":
+            task = op.get("task") or {}
+            line = f"➕ {task.get('title') or 'کار جدید'}"
+            if task.get("scheduled_at"):
+                line += f"\n   🗓 {local_datetime(task['scheduled_at'])}"
+            if task.get("due_at"):
+                line += f"\n   ⏳ ددلاین: {local_datetime(task['due_at'])}"
+            if task.get("priority") and task.get("priority") != "medium":
+                line += f"\n   ⚡ اولویت: {_priority_fa(task['priority'])}"
+            lines.append(line)
+            continue
+
+        task_id = int(op.get("task_id") or 0)
+        current = by_id.get(task_id)
+        title = current.title if current else f"کار شماره {fa_num(task_id)}"
+
+        if kind == "delete":
+            lines.append(f"🗑 حذف: {title}")
+        elif kind == "complete":
+            lines.append(f"✅ انجام‌شده: {title}")
+        elif kind == "update":
+            changes = op.get("changes") or {}
+            line = f"✏️ {title}"
+            if changes.get("title") and changes["title"] != title:
+                line += f"\n   عنوان جدید: {changes['title']}"
+            if "scheduled_at" in changes:
+                line += (
+                    f"\n   🗓 زمان جدید: {local_datetime(changes.get('scheduled_at'))}"
+                    if changes.get("scheduled_at")
+                    else "\n   🗓 زمان‌بندی برداشته بشه"
+                )
+            if "due_at" in changes:
+                line += (
+                    f"\n   ⏳ ددلاین جدید: {local_datetime(changes.get('due_at'))}"
+                    if changes.get("due_at")
+                    else "\n   ⏳ ددلاین برداشته بشه"
+                )
+            if changes.get("priority"):
+                line += f"\n   ⚡ اولویت: {_priority_fa(changes['priority'])}"
+            if changes.get("estimated_minutes"):
+                line += f"\n   ⏱ تخمین: {fa_num(changes['estimated_minutes'])} دقیقه"
+            if changes.get("project"):
+                line += f"\n   📁 پروژه: {changes['project']}"
+            lines.append(line)
+
+    lines.append("")
+    lines.append("تا تأیید نکنی هیچ‌کدوم اعمال نمی‌شن.")
+    return "\n".join(lines)
+
+
+async def _save_agent_preview(
+    update: Update,
+    user: User,
+    source_text: str,
+    payload: dict,
+    existing_draft_id: int | None = None,
+) -> None:
+    with SessionLocal() as db:
+        if existing_draft_id:
+            draft = db.get(AgentDraft, existing_draft_id)
+            if not draft or draft.user_id != user.id:
+                draft = None
+        else:
+            draft = None
+
+        if draft is None:
+            draft = AgentDraft(
+                user_id=user.id,
+                source_text=source_text,
+                payload_json=json.dumps(payload, ensure_ascii=False),
+                status="draft",
+            )
+            db.add(draft)
+        else:
+            draft.source_text = source_text
+            draft.payload_json = json.dumps(payload, ensure_ascii=False)
+            draft.status = "draft"
+            draft.updated_at = utc_now_iso()
+        db.commit()
+        db.refresh(draft)
+        draft_id = draft.id
+
+    _set_pending(user.id, "agent_preview", str(draft_id))
+    await update.effective_message.reply_text(
+        _render_agent_preview(user.id, payload),
+        reply_markup=agent_preview_keyboard(draft_id),
+    )
+
+
+async def _run_planning_agent(
+    update: Update,
+    user: User,
+    text: str,
+    voice_seconds: int = 0,
+    current_draft: dict | None = None,
+    existing_draft_id: int | None = None,
+) -> bool:
+    if not _quota_ok(user, voice_seconds):
+        return False
+
+    tasks = _agent_open_tasks(user.id)
+    try:
+        result = await ai.planning_agent(
+            text,
+            tasks,
+            IRAN_TZ,
+            current_draft=current_draft,
+        )
+        _charge_usage(user.id, voice_seconds)
+    except Exception as exc:
+        print(f"Planning agent error: {exc}")
+        return False
+
+    mode = result.get("mode")
+    if mode == "today":
+        await today(update, None)
+        return True
+    if mode == "upcoming":
+        await upcoming(update, None)
+        return True
+    if mode == "today_reports":
+        await today_reports(update, None)
+        return True
+    if mode == "reports":
+        await my_reports(update, None)
+        return True
+    if mode == "mutate":
+        await _save_agent_preview(
+            update,
+            user,
+            text,
+            result,
+            existing_draft_id=existing_draft_id,
+        )
+        return True
+    if mode == "report":
+        return False
+    return False
+
+
+async def _revise_agent_preview(
+    update: Update,
+    user: User,
+    text: str,
+    pending: tuple[str, str],
+    voice_seconds: int = 0,
+) -> bool:
+    if pending[0] != "agent_edit":
+        return False
+    try:
+        draft_id = int(pending[1])
+    except Exception:
+        _clear_pending(user.id)
+        return False
+
+    with SessionLocal() as db:
+        draft = db.get(AgentDraft, draft_id)
+        if not draft or draft.user_id != user.id or draft.status != "draft":
+            _clear_pending(user.id)
+            return False
+        try:
+            current = json.loads(draft.payload_json)
+        except Exception:
+            current = {}
+        original = draft.source_text
+
+    combined = f"دستور قبلی کاربر: {original}\nاصلاح جدید: {text}"
+    handled = await _run_planning_agent(
+        update,
+        user,
+        combined,
+        voice_seconds=voice_seconds,
+        current_draft=current,
+        existing_draft_id=draft_id,
+    )
+    if handled:
+        return True
+
+    await update.effective_message.reply_text(
+        "نتونستم این اصلاح رو با اطمینان روی برنامه اعمال کنم. یه کم ساده‌تر بگو چی عوض شه."
+    )
+    return True
+
+
+def _apply_agent_draft(user_id: int, draft_id: int) -> tuple[int, int, int, int]:
+    created = updated = deleted = completed = 0
+    with SessionLocal() as db:
+        draft = db.get(AgentDraft, draft_id)
+        if not draft or draft.user_id != user_id or draft.status != "draft":
+            return created, updated, deleted, completed
+
+        try:
+            payload = json.loads(draft.payload_json)
+        except Exception:
+            return created, updated, deleted, completed
+
+        for op in payload.get("operations") or []:
+            kind = op.get("type")
+            if kind == "create":
+                item = op.get("task") or {}
+                due_at = item.get("due_at") if item.get("due_source") == "explicit" else None
+                scheduled_at = item.get("scheduled_at")
+                reminder_at = item.get("reminder_at") or _default_reminder(scheduled_at, due_at)
+                db.add(Task(
+                    user_id=user_id,
+                    batch_id=str(uuid4()),
+                    title=str(item.get("title") or "کار جدید"),
+                    notes=str(item.get("notes") or ""),
+                    project=str(item.get("project") or ""),
+                    priority=item.get("priority") if item.get("priority") in {"low","medium","high","urgent"} else "medium",
+                    estimated_minutes=int(item.get("estimated_minutes") or 30),
+                    status="todo",
+                    source="agent",
+                    original_text=draft.source_text,
+                    due_at=due_at,
+                    due_source="explicit" if due_at else "none",
+                    scheduled_at=scheduled_at,
+                    reminder_at=reminder_at,
+                ))
+                created += 1
+                continue
+
+            try:
+                task_id = int(op.get("task_id"))
+            except Exception:
+                continue
+            task = db.get(Task, task_id)
+            if not task or task.user_id != user_id or task.status not in {"todo", "doing"}:
+                continue
+
+            if kind == "delete":
+                db.delete(task)
+                deleted += 1
+            elif kind == "complete":
+                task.status = "done"
+                task.updated_at = utc_now_iso()
+                existing = db.scalar(
+                    select(WorkReport).where(
+                        WorkReport.user_id == user_id,
+                        WorkReport.task_id == task.id,
+                        WorkReport.status == "submitted",
+                    )
+                )
+                if existing is None:
+                    db.add(WorkReport(
+                        user_id=user_id,
+                        task_id=task.id,
+                        title=task.title,
+                        summary=task.notes or task.title,
+                        project=task.project or "",
+                        category="کار انجام‌شده",
+                        duration_minutes=None,
+                        work_date=today_gregorian(),
+                        source="Agent برنامه‌ریزی",
+                        original_text=draft.source_text,
+                        status="submitted",
+                    ))
+                completed += 1
+            elif kind == "update":
+                changes = op.get("changes") or {}
+                for field in ("title", "notes", "project", "priority", "estimated_minutes", "scheduled_at", "due_at", "due_source", "reminder_at"):
+                    if field in changes:
+                        setattr(task, field, changes[field])
+                if "scheduled_at" in changes or "due_at" in changes:
+                    if "reminder_at" not in changes:
+                        task.reminder_at = _default_reminder(task.scheduled_at, task.due_at)
+                    task.reminder_sent = False
+                task.updated_at = utc_now_iso()
+                updated += 1
+
+        draft.status = "applied"
+        draft.updated_at = utc_now_iso()
+        db.commit()
+
+    return created, updated, deleted, completed
 
 
 def _task_payload(task: Task) -> dict:
