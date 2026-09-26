@@ -39,6 +39,7 @@ async def main() -> None:
         assert await ai.classify_intent("رباته رو ساختم کامل", "Asia/Tehran") == "report"
         assert await ai.classify_intent("یه ربات باید بسازم فیچراشو درارم", "Asia/Tehran") == "plan"
         assert await ai.classify_intent("امروز چی دارم؟", "Asia/Tehran") == "today"
+        assert await ai.classify_intent("امروز چیکار کردیم؟", "Asia/Tehran") == "today_reports"
 
     finally:
         await ai.close()
