@@ -279,7 +279,10 @@ async def _create_task_preview(update: Update, user: User, text: str, voice_seco
 
     batch_id = str(uuid4())
     with SessionLocal() as db:
+        deadline_is_explicit = _deadline_was_explicit(text)
         for item in parsed:
+            due_at = item.get("due_at") if deadline_is_explicit else None
+            due_source = item.get("due_source", "none") if due_at else "none"
             db.add(Task(
                 user_id=user.id,
                 batch_id=batch_id,
@@ -291,10 +294,10 @@ async def _create_task_preview(update: Update, user: User, text: str, voice_seco
                 status="draft",
                 source="voice" if voice_seconds else "text",
                 original_text=text,
-                due_at=item.get("due_at"),
-                due_source=item.get("due_source", "none"),
+                due_at=due_at,
+                due_source=due_source,
                 scheduled_at=item.get("scheduled_at"),
-                reminder_at=item.get("reminder_at") or _default_reminder(item.get("scheduled_at"), item.get("due_at")),
+                reminder_at=item.get("reminder_at") or _default_reminder(item.get("scheduled_at"), due_at),
             ))
         db.commit()
         tasks = db.scalars(select(Task).where(Task.batch_id == batch_id).order_by(Task.id)).all()
@@ -664,7 +667,10 @@ async def _replace_edit_from_voice(
                 return False
             for task in old:
                 db.delete(task)
+            deadline_is_explicit = _deadline_was_explicit(transcript)
             for item in fresh:
+                due_at = item.get("due_at") if deadline_is_explicit else None
+                due_source = item.get("due_source", "none") if due_at else "none"
                 db.add(Task(
                     user_id=user.id,
                     batch_id=ref,
@@ -676,11 +682,11 @@ async def _replace_edit_from_voice(
                     status="draft",
                     source="voice",
                     original_text=transcript,
-                    due_at=item.get("due_at"),
-                    due_source=item.get("due_source", "none"),
+                    due_at=due_at,
+                    due_source=due_source,
                     scheduled_at=item.get("scheduled_at"),
                     reminder_at=item.get("reminder_at") or _default_reminder(
-                        item.get("scheduled_at"), item.get("due_at")
+                        item.get("scheduled_at"), due_at
                     ),
                 ))
             db.commit()
