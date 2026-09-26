@@ -139,6 +139,208 @@ Schema: {"intent":"plan|report|today|today_reports|upcoming|reports|unknown"}"""
         intent = str(obj.get("intent") or "unknown")
         return intent if intent in {"plan", "report", "today", "today_reports", "upcoming", "reports", "unknown"} else "unknown"
 
+    async def planning_agent(
+        self,
+        text: str,
+        tasks: list[dict],
+        timezone_name: str = "Asia/Tehran",
+        current_draft: dict | None = None,
+    ) -> dict:
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        now = datetime.now(tz)
+
+        system = """تو Agent اصلی برنامه‌ریزی روزانه یک کاربر فارسی‌زبان هستی.
+وظیفه‌ات این نیست که فقط تسک استخراج کنی؛ باید دستور طبیعی کاربر را روی برنامه واقعی او بفهمی.
+
+کارهایی که باید پشتیبانی کنی:
+- ساخت یک یا چند کار جدید
+- تغییر عنوان، توضیح، پروژه، اولویت، تخمین زمان
+- گذاشتن یا تغییر زمان پیشنهادی انجام
+- گذاشتن یا تغییر ددلاین فقط وقتی خود کاربر صریح گفته
+- جابه‌جا کردن کارها به امروز، فردا، روز دیگر یا ساعت دیگر
+- عقب انداختن یا جلو آوردن کارها
+- حذف کار
+- انجام‌شده زدن کار
+- چیدن برنامه امروز یا فردا با توجه به زمان و اولویت
+- سبک‌تر کردن یک روز و منتقل کردن بخشی از کارها
+- اولویت‌بندی مجدد
+- پاسخ به «امروز چی دارم؟»، «کارای بعدیم چیه؟»، «امروز چیکار کردیم؟»، «گزارش‌هامو بده»
+- تشخیص گزارش انجام کار و تطبیق آن با Taskهای باز
+
+اصل محصول:
+این Agent کمک برنامه‌ریزی روزانه است. اگر دستور کاربر درباره برنامه‌ریزی قابل اجراست، تا حد ممکن آن را به عملیات مشخص روی Taskها تبدیل کن.
+
+mode فقط یکی از این‌ها:
+mutate = لازم است برنامه تغییر کند و operations اجرا شوند
+today = فقط برنامه امروز را می‌خواهد
+upcoming = فقط کارهای باز/آینده را می‌خواهد
+today_reports = کارهای انجام‌شده امروز را می‌خواهد
+reports = گزارش‌های انجام‌شده قبلی را می‌خواهد
+report = یک گزارش کار جدید است که به Taskهای موجود ربط روشنی ندارد
+unknown = واقعاً قابل فهم نیست
+
+قوانین خیلی مهم:
+1. برای update/delete/complete فقط از task_idهای موجود در current_tasks استفاده کن.
+2. وقتی کاربر به یک Task موجود اشاره می‌کند، Task جدید مشابه نساز.
+3. اگر گفت «فلان کارو انجام دادم»، operation نوع complete بساز.
+4. اگر گفت «فلان رو حذف کن»، delete بساز.
+5. اگر گفت «بندازش فردا ساعت ۱۰»، update با scheduled_at بساز.
+6. اگر گفت «ددلاینش جمعه‌ست»، due_at را update کن و due_source را explicit بگذار.
+7. اگر فقط گفت «فردا انجامش بده» و از ددلاین حرف نزد، due_at نساز؛ فقط scheduled_at.
+8. اگر گفت «برنامه فردامو بچین» یا «امروزمو مرتب کن»، می‌توانی چند update برای scheduled_at بدهی. ترتیب باید منطقی باشد و زمان‌ها روی هم نیفتند.
+9. اگر زمان دقیق نداری و کاربر فقط یک کار جدید گفته، ساعت دقیق ساختگی لازم نیست؛ scheduled_at می‌تواند null باشد.
+10. اگر کاربر گفت روزم سبک‌تر شود، کارهای کم‌اولویت‌تر را جابه‌جا کن و ددلاین صریح را نقض نکن.
+11. تغییراتی که کاربر نخواسته را انجام نده.
+12. عنوان، notes و project فارسی باشند مگر اسم خاصی که خود کاربر انگلیسی گفته.
+13. priority فقط low, medium, high, urgent.
+14. تاریخ‌زمان‌ها ISO 8601 با offset باشند.
+15. خروجی فقط JSON معتبر باشد.
+
+Schema:
+{
+  "mode":"mutate|today|upcoming|today_reports|reports|report|unknown",
+  "operations":[
+    {
+      "type":"create",
+      "task":{
+        "title":"...",
+        "notes":"",
+        "project":"",
+        "priority":"medium",
+        "estimated_minutes":30,
+        "due_at":null,
+        "due_source":"explicit|none",
+        "scheduled_at":null,
+        "reminder_at":null
+      }
+    },
+    {
+      "type":"update",
+      "task_id":12,
+      "changes":{
+        "title":"...",
+        "notes":"...",
+        "project":"...",
+        "priority":"high",
+        "estimated_minutes":45,
+        "due_at":null,
+        "due_source":"none",
+        "scheduled_at":"...",
+        "reminder_at":null
+      }
+    },
+    {"type":"delete","task_id":13},
+    {"type":"complete","task_id":14}
+  ]
+}"""
+
+        task_payload = []
+        valid_ids = set()
+        for task in tasks[:100]:
+            try:
+                task_id = int(task.get("id"))
+            except Exception:
+                continue
+            valid_ids.add(task_id)
+            task_payload.append({
+                "id": task_id,
+                "title": str(task.get("title") or ""),
+                "notes": str(task.get("notes") or ""),
+                "project": str(task.get("project") or ""),
+                "priority": str(task.get("priority") or "medium"),
+                "estimated_minutes": task.get("estimated_minutes"),
+                "status": str(task.get("status") or ""),
+                "scheduled_at": task.get("scheduled_at"),
+                "due_at": task.get("due_at"),
+                "due_source": str(task.get("due_source") or "none"),
+                "original_text": str(task.get("original_text") or ""),
+            })
+
+        user_payload = {
+            "now": now.isoformat(),
+            "timezone": timezone_name,
+            "user_message": text,
+            "current_tasks": task_payload,
+        }
+        if current_draft:
+            user_payload["current_draft"] = current_draft
+
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": 2200,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        mode = str(obj.get("mode") or "unknown")
+        allowed_modes = {"mutate", "today", "upcoming", "today_reports", "reports", "report", "unknown"}
+        if mode not in allowed_modes:
+            mode = "unknown"
+
+        operations = []
+        for op in (obj.get("operations") or [])[:40]:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type") or "")
+            if op_type == "create":
+                task = op.get("task")
+                if not isinstance(task, dict):
+                    continue
+                cleaned = self._clean_tasks([task], timezone_name)
+                if cleaned:
+                    operations.append({"type": "create", "task": cleaned[0]})
+                continue
+
+            if op_type in {"update", "delete", "complete"}:
+                try:
+                    task_id = int(op.get("task_id"))
+                except Exception:
+                    continue
+                if task_id not in valid_ids:
+                    continue
+
+                if op_type == "update":
+                    raw_changes = op.get("changes")
+                    if not isinstance(raw_changes, dict):
+                        continue
+                    changes = {}
+                    if "title" in raw_changes and str(raw_changes.get("title") or "").strip():
+                        changes["title"] = str(raw_changes["title"]).strip()[:500]
+                    if "notes" in raw_changes:
+                        changes["notes"] = str(raw_changes.get("notes") or "").strip()
+                    if "project" in raw_changes:
+                        changes["project"] = str(raw_changes.get("project") or "").strip()[:200]
+                    if raw_changes.get("priority") in {"low", "medium", "high", "urgent"}:
+                        changes["priority"] = raw_changes["priority"]
+                    if "estimated_minutes" in raw_changes:
+                        changes["estimated_minutes"] = self._int(raw_changes.get("estimated_minutes"), 30, 5, 1440)
+                    if "scheduled_at" in raw_changes:
+                        changes["scheduled_at"] = self._normalize_iso(raw_changes.get("scheduled_at"), timezone_name)
+                    if "reminder_at" in raw_changes:
+                        changes["reminder_at"] = self._normalize_iso(raw_changes.get("reminder_at"), timezone_name)
+                    if "due_at" in raw_changes:
+                        due_source = "explicit" if raw_changes.get("due_source") == "explicit" and raw_changes.get("due_at") else "none"
+                        changes["due_at"] = self._normalize_iso(raw_changes.get("due_at"), timezone_name) if due_source == "explicit" else None
+                        changes["due_source"] = due_source
+                    if changes:
+                        operations.append({"type": "update", "task_id": task_id, "changes": changes})
+                else:
+                    operations.append({"type": op_type, "task_id": task_id})
+
+        if mode == "mutate" and not operations:
+            mode = "unknown"
+
+        return {"mode": mode, "operations": operations}
+
     async def parse_tasks(self, text: str, timezone_name: str, language_code: str = "fa") -> list[dict]:
         try:
             tz = ZoneInfo(timezone_name)
