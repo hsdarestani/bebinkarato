@@ -553,9 +553,6 @@ async def _try_simple_task_edit(update: Update, user: User, ref: str, instructio
 async def _handle_edit_text(update: Update, user: User, instruction: str, pending: tuple[str, str]) -> bool:
     kind, ref = pending
     if kind == "task_edit":
-        if await _try_simple_task_edit(update, user, ref, instruction):
-            return True
-
         with SessionLocal() as db:
             tasks = db.scalars(
                 select(Task)
@@ -565,11 +562,21 @@ async def _handle_edit_text(update: Update, user: User, instruction: str, pendin
             current = [_task_payload(t) for t in tasks]
             original_text = tasks[0].original_text if tasks else ""
             original_source = tasks[0].source if tasks else "edit"
+
         try:
-            revised = await ai.revise_tasks(current, instruction, IRAN_TZ)
+            revised = await ai.revise_tasks(
+                current,
+                instruction,
+                IRAN_TZ,
+                original_text=original_text,
+            )
         except Exception as exc:
-            print(f"Task revision error: {exc}")
-            await update.effective_message.reply_text("نتونستم اصلاحش کنم 😅 یه بار دیگه بگو چی رو عوض کنم.")
+            print(f"Task semantic revision error: {exc}")
+            if await _try_simple_task_edit(update, user, ref, instruction):
+                return True
+            await update.effective_message.reply_text(
+                "منظورت رو گرفتم ولی نتونستم با اطمینان اصلاحش کنم 😅 یه بار خیلی کوتاه‌تر بگو چی باید عوض شه."
+            )
             return True
         with SessionLocal() as db:
             old = db.scalars(
@@ -577,8 +584,13 @@ async def _handle_edit_text(update: Update, user: User, instruction: str, pendin
             ).all()
             for task in old:
                 db.delete(task)
+            allow_deadline = (
+                _deadline_was_explicit(original_text)
+                or _deadline_was_explicit(instruction)
+                or any(t.get("due_at") for t in current)
+            )
             for item in revised:
-                due_at = item.get("due_at") if _deadline_was_explicit(original_text) else None
+                due_at = item.get("due_at") if allow_deadline else None
                 due_source = item.get("due_source", "none") if due_at else "none"
                 db.add(Task(
                     user_id=user.id, batch_id=ref, title=item["title"], notes=item.get("notes", ""),
@@ -596,6 +608,9 @@ async def _handle_edit_text(update: Update, user: User, instruction: str, pendin
             ).all()
             preview = render_task_preview(tasks)
         _set_pending(user.id, "task_preview", ref)
+        await update.effective_message.reply_text(
+            "آره، منظورت رو گرفتم و اصلاحش کردم 👌"
+        )
         await update.effective_message.reply_text(preview, reply_markup=task_preview_keyboard(ref))
         return True
 
