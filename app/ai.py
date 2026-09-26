@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 from datetime import datetime, timezone
@@ -60,11 +61,49 @@ class CloudflareAI:
         return data.get("result") or {}
 
     async def transcribe(self, audio: bytes) -> str:
-        result = await self._run(settings.cloudflare_whisper_model, {}, raw_audio=audio)
+        result = await self._run(
+            settings.cloudflare_whisper_model,
+            {
+                "audio": base64.b64encode(audio).decode("ascii"),
+                "task": "transcribe",
+                "language": "fa",
+                "vad_filter": True,
+                "initial_prompt": "گفتار فارسی محاوره‌ای درباره کارها، برنامه‌ریزی، پروژه‌ها، سایت، ربات، خرید، باشگاه، جلسه و گزارش کار است.",
+                "beam_size": 5,
+                "condition_on_previous_text": False,
+                "no_speech_threshold": 0.55,
+                "compression_ratio_threshold": 2.2,
+                "log_prob_threshold": -0.8
+            },
+        )
         text = result.get("text") or result.get("transcription") or result.get("response") or ""
-        if not text.strip():
+        if not str(text).strip():
             raise AIError("No transcription was returned.")
-        return text.strip()
+        return await self.clean_transcript(str(text).strip())
+
+    async def clean_transcript(self, text: str) -> str:
+        system = """تو فقط متن تبدیل‌شده از ویس فارسی را تمیز می‌کنی.
+قوانین خیلی سخت:
+1. فقط غلط‌های واضح املایی، فاصله، نیم‌فاصله و اشتباه‌های خیلی روشن گفتاربه‌متن را اصلاح کن.
+2. هیچ کار، اسم، پروژه، زمان، مکان یا جزئیاتی از خودت اضافه نکن.
+3. اگر درباره یک کلمه مطمئن نیستی، همان متن خام را نگه دار.
+4. معنی و لحن محاوره‌ای کاربر را حفظ کن.
+5. فقط JSON معتبر برگردان.
+Schema: {"text":"متن تمیزشده"}"""
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": 0,
+                "max_tokens": 600,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        cleaned = str(obj.get("text") or text).strip()
+        return cleaned or text
 
     async def classify_intent(self, text: str, timezone_name: str = "Asia/Tehran") -> str:
         now = datetime.now(ZoneInfo(timezone_name))
