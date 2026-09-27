@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     cloudflare_api_token: str = ""
     cloudflare_account_id: str = ""
     cloudflare_llm_model: str = "@cf/meta/llama-3.1-8b-instruct-fast"
+    cloudflare_agent_model: str = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
     cloudflare_whisper_model: str = "@cf/openai/whisper-large-v3-turbo"
 
     database_url: str = "sqlite:////data/bebinkarato.db"
