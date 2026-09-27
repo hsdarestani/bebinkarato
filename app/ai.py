@@ -17,6 +17,38 @@ class AIError(RuntimeError):
 
 
 class CloudflareAI:
+    @staticmethod
+    def _agent_response_format() -> dict:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["mutate", "today", "upcoming", "today_reports", "reports", "report", "unknown"],
+                    },
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["create", "update", "delete", "complete"],
+                                },
+                                "task_id": {"type": "integer"},
+                                "task": {"type": "object"},
+                                "changes": {"type": "object"},
+                            },
+                            "required": ["type"],
+                        },
+                    },
+                },
+                "required": ["mode", "operations"],
+            },
+        }
+
     def __init__(self) -> None:
         self.token = settings.cloudflare_api_token
         self.account_id = settings.cloudflare_account_id
@@ -273,12 +305,13 @@ Schema:
             user_payload["current_draft"] = current_draft
 
         result = await self._run(
-            settings.cloudflare_llm_model,
+            settings.cloudflare_agent_model,
             {
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
                 ],
+                "response_format": self._agent_response_format(),
                 "temperature": 0,
                 "max_tokens": 2200,
             },
@@ -413,7 +446,7 @@ Schema:
 }"""
 
         result = await self._run(
-            settings.cloudflare_llm_model,
+            settings.cloudflare_agent_model,
             {
                 "messages": [
                     {"role": "system", "content": system},
@@ -425,6 +458,7 @@ Schema:
                         "edit_request": instruction,
                     }, ensure_ascii=False)},
                 ],
+                "response_format": self._agent_response_format(),
                 "temperature": 0,
                 "max_tokens": 2200,
             },
