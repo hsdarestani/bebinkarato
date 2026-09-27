@@ -406,20 +406,32 @@ async def _revise_agent_preview(
             current = {}
         original = draft.source_text
 
-    combined = f"دستور قبلی کاربر: {original}\nاصلاح جدید: {text}"
-    handled = await _run_planning_agent(
-        update,
-        user,
-        combined,
-        voice_seconds=voice_seconds,
-        current_draft=current,
-        existing_draft_id=draft_id,
-    )
-    if handled:
+    if not _quota_ok(user, voice_seconds):
+        await update.effective_message.reply_text("سهمیه هوش مصنوعی این ماهت پر شده 😅")
         return True
 
-    await update.effective_message.reply_text(
-        "نتونستم این اصلاح رو با اطمینان روی برنامه اعمال کنم. یه کم ساده‌تر بگو چی عوض شه."
+    tasks = _agent_open_tasks(user.id)
+    try:
+        revised = await ai.revise_planning_draft(
+            text,
+            current,
+            tasks,
+            IRAN_TZ,
+        )
+        _charge_usage(user.id, voice_seconds)
+    except Exception as exc:
+        print(f"Planning draft revision error: {exc}")
+        await update.effective_message.reply_text(
+            "این اصلاح رو نتونستم درست روی پیش‌نمایش اعمال کنم. دوباره همون تغییر رو بگو."
+        )
+        return True
+
+    await _save_agent_preview(
+        update,
+        user,
+        original,
+        revised,
+        existing_draft_id=draft_id,
     )
     return True
 
