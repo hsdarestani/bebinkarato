@@ -1,3 +1,4 @@
+import ast
 import base64
 import json
 import re
@@ -933,19 +934,54 @@ Schema:
     def _extract_json(raw) -> dict:
         if isinstance(raw, dict):
             return raw
+
         raw = str(raw or "").strip()
-        raw = re.sub(r"^\x60\x60\x60(?:json)?\s*", "", raw, flags=re.I)
+        raw = raw.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        raw = re.sub(r"^\x60\x60\x60(?:json|python)?\s*", "", raw, flags=re.I)
         raw = re.sub(r"\s*\x60\x60\x60$", "", raw)
-        try:
-            return json.loads(raw)
-        except Exception:
-            match = re.search(r"\{.*\}", raw, flags=re.S)
-            if not match:
-                raise AIError("Could not read the model response.")
+
+        candidates = [raw]
+        match = re.search(r"\{.*\}", raw, flags=re.S)
+        if match and match.group(0) != raw:
+            candidates.append(match.group(0))
+
+        last_error = None
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+
             try:
-                return json.loads(match.group(0))
+                obj = json.loads(candidate)
+                if isinstance(obj, dict):
+                    return obj
             except Exception as exc:
-                raise AIError("Could not read the model JSON.") from exc
+                last_error = exc
+
+            # Some Workers AI models occasionally return Python-style dicts
+            # with single quotes despite an explicit JSON instruction.
+            try:
+                obj = ast.literal_eval(candidate)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception as exc:
+                last_error = exc
+
+            # Repair the most common mixed JSON/Python form:
+            # single-quoted keys/strings plus JSON null/true/false.
+            try:
+                pythonish = re.sub(r"\bnull\b", "None", candidate, flags=re.I)
+                pythonish = re.sub(r"\btrue\b", "True", pythonish, flags=re.I)
+                pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.I)
+                obj = ast.literal_eval(pythonish)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception as exc:
+                last_error = exc
+
+        if not match:
+            raise AIError("Could not read the model response.")
+        raise AIError("Could not read the model JSON.") from last_error
 
     @staticmethod
     def _int(value, default: int, minimum: int, maximum: int) -> int:
