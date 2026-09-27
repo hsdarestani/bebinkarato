@@ -19,6 +19,18 @@ class AIError(RuntimeError):
 class CloudflareAI:
     @staticmethod
     def _agent_response_format() -> dict:
+        task_fields = {
+            "title": {"type": "string"},
+            "notes": {"type": "string"},
+            "project": {"type": "string"},
+            "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
+            "estimated_minutes": {"type": "integer"},
+            "due_at": {"type": ["string", "null"]},
+            "due_source": {"type": "string", "enum": ["explicit", "none"]},
+            "scheduled_at": {"type": ["string", "null"]},
+            "reminder_at": {"type": ["string", "null"]},
+        }
+        change_fields = dict(task_fields)
         return {
             "type": "json_schema",
             "json_schema": {
@@ -38,8 +50,14 @@ class CloudflareAI:
                                     "enum": ["create", "update", "delete", "complete"],
                                 },
                                 "task_id": {"type": "integer"},
-                                "task": {"type": "object"},
-                                "changes": {"type": "object"},
+                                "task": {
+                                    "type": "object",
+                                    "properties": task_fields,
+                                },
+                                "changes": {
+                                    "type": "object",
+                                    "properties": change_fields,
+                                },
                             },
                             "required": ["type"],
                         },
@@ -48,6 +66,7 @@ class CloudflareAI:
                 "required": ["mode", "operations"],
             },
         }
+
 
     def __init__(self) -> None:
         self.token = settings.cloudflare_api_token
@@ -380,6 +399,154 @@ Schema:
 
         return {"mode": mode, "operations": operations}
 
+    @staticmethod
+    def _fa_norm(value: str) -> str:
+        return (
+            str(value or "")
+            .replace("ي", "ی")
+            .replace("ك", "ک")
+            .replace("‌", " ")
+            .translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+            .lower()
+        )
+
+    @classmethod
+    def _parse_clock_from_text(cls, value: str) -> tuple[int, int] | None:
+        text = cls._fa_norm(value)
+        match = re.search(r"(?:ساعت\s*)?(\d{1,2})(?::(\d{1,2}))?\s*(صبح|ظهر|عصر|شب)?", text)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        if hour > 23 or minute > 59:
+            return None
+        part = match.group(3) or ""
+        if part in {"عصر", "شب"} and 1 <= hour < 12:
+            hour += 12
+        elif part == "ظهر" and 1 <= hour < 12:
+            hour += 12
+        elif part == "صبح" and hour == 12:
+            hour = 0
+        return hour, minute
+
+    @classmethod
+    def _fallback_revise_draft_times(
+        cls,
+        instruction: str,
+        current_draft: dict,
+        timezone_name: str,
+    ) -> dict | None:
+        operations = json.loads(json.dumps(current_draft.get("operations") or []))
+        if not operations:
+            return None
+
+        normalized = cls._fa_norm(instruction)
+        if "ساعت" not in normalized and not any(x in normalized for x in ["صبح", "ظهر", "عصر", "شب"]):
+            return None
+
+        clauses = [
+            part.strip()
+            for part in re.split(r"[\n،,;؛]+", instruction)
+            if part.strip()
+        ]
+        timed_clauses = [(clause, cls._parse_clock_from_text(clause)) for clause in clauses]
+        timed_clauses = [(clause, clock) for clause, clock in timed_clauses if clock is not None]
+        if not timed_clauses:
+            return None
+
+        stop = {
+            "ساعت","رو","را","بذار","بزار","قرار","بده","کن","هم","در","به","و",
+            "صبح","ظهر","عصر","شب","امروز","فردا","پس","اولی","دومی","سومی","چهارمی",
+        }
+        ordinal_map = {
+            "اولی": 0, "اول": 0,
+            "دومی": 1, "دوم": 1,
+            "سومی": 2, "سوم": 2,
+            "چهارمی": 3, "چهارم": 3,
+            "پنجمی": 4, "پنجم": 4,
+            "ششمی": 5, "ششم": 5,
+        }
+
+        def tokens(value: str) -> set[str]:
+            cleaned = re.sub(r"[^\w\sآ-ی]", " ", cls._fa_norm(value))
+            return {
+                t for t in cleaned.split()
+                if len(t) >= 2 and t not in stop and not t.isdigit()
+            }
+
+        op_titles = []
+        for op in operations:
+            if op.get("type") == "create":
+                title = str((op.get("task") or {}).get("title") or "")
+            else:
+                title = ""
+            op_titles.append((title, tokens(title)))
+
+        used = set()
+        changed = 0
+        for seq, (clause, clock) in enumerate(timed_clauses):
+            clause_n = cls._fa_norm(clause)
+            target = None
+
+            for word, idx in ordinal_map.items():
+                if word in clause_n and idx < len(operations):
+                    target = idx
+                    break
+
+            if target is None:
+                ct = tokens(clause)
+                best_score = 0
+                for idx, (title, tt) in enumerate(op_titles):
+                    if idx in used or not title:
+                        continue
+                    score = len(ct & tt)
+                    if score > best_score:
+                        best_score = score
+                        target = idx
+                if best_score == 0:
+                    target = None
+
+            if target is None and len(timed_clauses) == len(operations) and seq < len(operations):
+                target = seq
+
+            if target is None or target >= len(operations):
+                continue
+
+            op = operations[target]
+            if op.get("type") != "create":
+                continue
+            task = op.get("task") or {}
+            current_raw = task.get("scheduled_at")
+            try:
+                if current_raw:
+                    base = datetime.fromisoformat(str(current_raw).replace("Z", "+00:00")).astimezone(ZoneInfo(timezone_name))
+                else:
+                    base = datetime.now(ZoneInfo(timezone_name))
+            except Exception:
+                base = datetime.now(ZoneInfo(timezone_name))
+
+            clause_norm = cls._fa_norm(clause)
+            whole_norm = cls._fa_norm(instruction)
+            relative = clause_norm if any(x in clause_norm for x in ["امروز", "فردا", "پس فردا"]) else whole_norm
+            if "پس فردا" in relative:
+                base = base + timedelta(days=2)
+            elif "فردا" in relative:
+                base = base + timedelta(days=1)
+            elif "امروز" in relative:
+                base = datetime.now(ZoneInfo(timezone_name))
+
+            hour, minute = clock
+            scheduled = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            task["scheduled_at"] = scheduled.astimezone(timezone.utc).isoformat()
+            task["reminder_at"] = None
+            op["task"] = task
+            used.add(target)
+            changed += 1
+
+        if not changed:
+            return None
+        return {"mode": "mutate", "operations": operations}
+
     async def revise_planning_draft(
         self,
         instruction: str,
@@ -517,6 +684,13 @@ Schema:
                     operations.append({"type": op_type, "task_id": task_id})
 
         if not operations:
+            fallback = self._fallback_revise_draft_times(
+                instruction,
+                current_draft,
+                timezone_name,
+            )
+            if fallback:
+                return fallback
             raise AIError("Draft revision returned no valid operations.")
 
         return {"mode": "mutate", "operations": operations}
