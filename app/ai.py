@@ -341,7 +341,183 @@ Schema:
         if mode == "mutate" and not operations:
             mode = "unknown"
 
+        if mode == "mutate":
+            operations = self._deconflict_agent_schedule(operations)
+
         return {"mode": mode, "operations": operations}
+
+    async def revise_planning_draft(
+        self,
+        instruction: str,
+        current_draft: dict,
+        tasks: list[dict],
+        timezone_name: str = "Asia/Tehran",
+    ) -> dict:
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+            timezone_name = "Asia/Tehran"
+        now = datetime.now(tz)
+
+        valid_ids = set()
+        task_payload = []
+        for task in tasks[:100]:
+            try:
+                task_id = int(task.get("id"))
+            except Exception:
+                continue
+            valid_ids.add(task_id)
+            task_payload.append({
+                "id": task_id,
+                "title": str(task.get("title") or ""),
+                "notes": str(task.get("notes") or ""),
+                "project": str(task.get("project") or ""),
+                "priority": str(task.get("priority") or "medium"),
+                "estimated_minutes": task.get("estimated_minutes"),
+                "status": str(task.get("status") or ""),
+                "scheduled_at": task.get("scheduled_at"),
+                "due_at": task.get("due_at"),
+                "due_source": str(task.get("due_source") or "none"),
+            })
+
+        system = """تو فقط ویرایشگر Preview یک Agent برنامه‌ریزی روزانه فارسی هستی.
+یک Draft فعلی داری که هنوز روی دیتابیس اعمال نشده و کاربر حالا می‌خواهد همان Preview را اصلاح کند.
+
+قواعد حیاتی:
+1. خروجی باید کل Draft نهایی را برگرداند، نه فقط تغییر جدید.
+2. ترتیب operations را حفظ کن مگر کاربر صریحاً ترتیب را عوض کرده باشد.
+3. operationهای create هنوز Task واقعی نیستند. هرگز create را برای ویرایش به update با task_id خیالی تبدیل نکن.
+4. اگر کاربر می‌گوید «اولی»، «دومی»، «سومی»، «چهارمی» منظور ترتیب operationهای قابل مشاهده در Preview است.
+5. اگر کاربر اسم کار را می‌گوید، معنایی همان آیتم را پیدا کن.
+6. برای create فقط فیلدهای داخل task را عوض کن.
+7. برای update/delete/complete مربوط به Task واقعی، task_id موجود را حفظ کن.
+8. تغییراتی که کاربر نگفته دست‌نخورده بمانند.
+9. «ساعت ۸ شب» یعنی 20:00، «۵ عصر» یعنی 17:00، «۱۰ شب» یعنی 22:00، «۱۱ شب» یعنی 23:00.
+10. تاریخ نسبی را با now و timezone ایران حل کن.
+11. due_at فقط اگر کاربر صریحاً درباره ددلاین/مهلت حرف زده تغییر کند. تغییر ساعت انجام فقط scheduled_at است.
+12. اگر چند زمان جدید داده، همه را در یک پاسخ اعمال کن.
+13. هیچ operation جدیدی از خودت اختراع نکن مگر کاربر صریحاً کار جدید اضافه کرده باشد.
+14. فقط JSON معتبر برگردان.
+
+Schema:
+{
+  "mode":"mutate",
+  "operations":[
+    {"type":"create","task":{"title":"...","notes":"","project":"","priority":"medium","estimated_minutes":30,"due_at":null,"due_source":"none","scheduled_at":null,"reminder_at":null}},
+    {"type":"update","task_id":12,"changes":{"scheduled_at":"..."}},
+    {"type":"delete","task_id":13},
+    {"type":"complete","task_id":14}
+  ]
+}"""
+
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps({
+                        "now": now.isoformat(),
+                        "timezone": timezone_name,
+                        "current_draft": current_draft,
+                        "current_tasks": task_payload,
+                        "edit_request": instruction,
+                    }, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": 2200,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        operations = []
+
+        for op in (obj.get("operations") or [])[:40]:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type") or "")
+
+            if op_type == "create":
+                item = op.get("task")
+                if not isinstance(item, dict):
+                    continue
+                cleaned = self._clean_tasks([item], timezone_name)
+                if cleaned:
+                    operations.append({"type": "create", "task": cleaned[0]})
+                continue
+
+            if op_type in {"update", "delete", "complete"}:
+                try:
+                    task_id = int(op.get("task_id"))
+                except Exception:
+                    continue
+                if task_id not in valid_ids:
+                    continue
+
+                if op_type == "update":
+                    raw = op.get("changes")
+                    if not isinstance(raw, dict):
+                        continue
+                    changes = {}
+                    if "title" in raw and str(raw.get("title") or "").strip():
+                        changes["title"] = str(raw["title"]).strip()[:500]
+                    if "notes" in raw:
+                        changes["notes"] = str(raw.get("notes") or "").strip()
+                    if "project" in raw:
+                        changes["project"] = str(raw.get("project") or "").strip()[:200]
+                    if raw.get("priority") in {"low", "medium", "high", "urgent"}:
+                        changes["priority"] = raw["priority"]
+                    if "estimated_minutes" in raw:
+                        changes["estimated_minutes"] = self._int(raw.get("estimated_minutes"), 30, 5, 1440)
+                    if "scheduled_at" in raw:
+                        changes["scheduled_at"] = self._normalize_iso(raw.get("scheduled_at"), timezone_name)
+                    if "reminder_at" in raw:
+                        changes["reminder_at"] = self._normalize_iso(raw.get("reminder_at"), timezone_name)
+                    if "due_at" in raw:
+                        due_source = "explicit" if raw.get("due_source") == "explicit" and raw.get("due_at") else "none"
+                        changes["due_at"] = self._normalize_iso(raw.get("due_at"), timezone_name) if due_source == "explicit" else None
+                        changes["due_source"] = due_source
+                    if changes:
+                        operations.append({"type": "update", "task_id": task_id, "changes": changes})
+                else:
+                    operations.append({"type": op_type, "task_id": task_id})
+
+        if not operations:
+            raise AIError("Draft revision returned no valid operations.")
+
+        return {"mode": "mutate", "operations": operations}
+
+    @staticmethod
+    def _deconflict_agent_schedule(operations: list[dict]) -> list[dict]:
+        # اگر مدل چند کار را دقیقاً روی یک لحظه چیده، آن‌ها را پشت‌سرهم قرار بده.
+        # این فقط برای collisionهای واضح است و زمان‌های متفاوت کاربر را دست نمی‌زند.
+        last_end_by_start: dict[str, datetime] = {}
+        seen_starts: dict[str, datetime] = {}
+
+        for op in operations:
+            if op.get("type") != "create":
+                continue
+            task = op.get("task") or {}
+            raw = task.get("scheduled_at")
+            if not raw:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except Exception:
+                continue
+
+            key = dt.replace(second=0, microsecond=0).isoformat()
+            if key not in seen_starts:
+                seen_starts[key] = dt
+                duration = max(5, int(task.get("estimated_minutes") or 30))
+                last_end_by_start[key] = dt + timedelta(minutes=duration)
+                continue
+
+            new_start = last_end_by_start[key]
+            task["scheduled_at"] = new_start.isoformat()
+            duration = max(5, int(task.get("estimated_minutes") or 30))
+            last_end_by_start[key] = new_start + timedelta(minutes=duration)
+
+        return operations
 
     async def parse_tasks(self, text: str, timezone_name: str, language_code: str = "fa") -> list[dict]:
         try:
