@@ -1,6 +1,8 @@
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -40,6 +42,29 @@ async def main() -> None:
         assert await ai.classify_intent("یه ربات باید بسازم فیچراشو درارم", "Asia/Tehran") == "plan"
         assert await ai.classify_intent("امروز چی دارم؟", "Asia/Tehran") == "today"
         assert await ai.classify_intent("امروز چیکار کردیم؟", "Asia/Tehran") == "today_reports"
+
+        today = datetime.now(ZoneInfo("Asia/Tehran")).date().isoformat()
+        draft = {
+            "mode": "mutate",
+            "operations": [
+                {"type": "create", "task": {"title": "بسته بندی چای", "notes": "", "project": "", "priority": "medium", "estimated_minutes": 30, "due_at": None, "due_source": "none", "scheduled_at": f"{today}T15:57:00+03:30", "reminder_at": None}},
+                {"type": "create", "task": {"title": "خرید غذا و تشویقی", "notes": "", "project": "", "priority": "medium", "estimated_minutes": 30, "due_at": None, "due_source": "none", "scheduled_at": f"{today}T16:27:00+03:30", "reminder_at": None}},
+                {"type": "create", "task": {"title": "مرتب کردن اتاق کار", "notes": "", "project": "", "priority": "medium", "estimated_minutes": 30, "due_at": None, "due_source": "none", "scheduled_at": f"{today}T16:57:00+03:30", "reminder_at": None}},
+                {"type": "create", "task": {"title": "تکمیل سایت ریشه و انتشار نسخه جدید", "notes": "", "project": "", "priority": "high", "estimated_minutes": 120, "due_at": None, "due_source": "none", "scheduled_at": f"{today}T17:27:00+03:30", "reminder_at": None}},
+            ],
+        }
+        revised = await ai.revise_planning_draft(
+            "ساعتاشو عوض کن. چای رو بذار ساعت ۸ شب، خرید غذا و تشویقی ساعت ۵ عصر، مرتب کردن اتاق ساعت ۱۰ شب، تکمیل سایت هم ساعت ۱۱ شب",
+            draft,
+            [],
+            "Asia/Tehran",
+        )
+        assert len(revised["operations"]) == 4
+        local_hours = [
+            datetime.fromisoformat(op["task"]["scheduled_at"]).astimezone(ZoneInfo("Asia/Tehran")).hour
+            for op in revised["operations"]
+        ]
+        assert local_hours == [20, 17, 22, 23], local_hours
 
     finally:
         await ai.close()
