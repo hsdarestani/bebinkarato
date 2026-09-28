@@ -197,6 +197,7 @@ Schema: {"intent":"plan|report|today|today_reports|upcoming|reports|unknown"}"""
         tasks: list[dict],
         timezone_name: str = "Asia/Tehran",
         current_draft: dict | None = None,
+        focus_task_ids: list[int] | None = None,
     ) -> dict:
         try:
             tz = ZoneInfo(timezone_name)
@@ -253,6 +254,9 @@ unknown = واقعاً قابل فهم نیست
 15. خروجی فقط JSON معتبر باشد.
 16. اگر current_draft وجود دارد، پیام جدید کاربر اصلاح همان پیش‌نمایش قبلی است. عملیات فعلی را حفظ کن و فقط چیزی را که کاربر خواسته تغییر بده؛ مگر اینکه صریحاً بخواهد از نو بچینی.
 17. در حالت اصلاح Preview، عملیات نهایی کامل را برگردان، نه فقط delta جدید.
+18. اگر focus_task_ids داده شده و کاربر با عباراتی مثل «اینا»، «همینا»، «اون کارا»، «اون دوتا/سه‌تا» اشاره می‌کند، منظور دقیقاً همان Taskهاست.
+19. در حالت 18 حق نداری از «فردا»، «امروز» یا عبارت اشاره‌ای یک Task جدید بسازی. باید روی همان Taskهای موجود update/delete/complete انجام بدهی، مگر کاربر صریحاً بگوید یک کار جدید اضافه کن.
+20. اگر کاربر گفت «اینا باشه برای فردا»، scheduled_at همان Taskها را به فردا منتقل کن و ساعت قبلی هر Task را تا حد ممکن حفظ کن. due_at را تغییر نده مگر کاربر صریحاً از ددلاین حرف زده باشد.
 
 Schema:
 {
@@ -319,6 +323,7 @@ Schema:
             "timezone": timezone_name,
             "user_message": text,
             "current_tasks": task_payload,
+            "focus_task_ids": [int(x) for x in (focus_task_ids or []) if int(x) in valid_ids],
         }
         if current_draft:
             user_payload["current_draft"] = current_draft
