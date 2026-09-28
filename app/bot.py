@@ -2119,27 +2119,52 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     today_date = datetime.now(tz).date()
     with SessionLocal() as db:
         tasks = db.scalars(select(Task).where(Task.user_id == user.id, Task.status.in_(["todo", "doing"]))).all()
+
     selected = []
+    overdue = []
     for task in tasks:
         target = task.scheduled_at or task.due_at
-        if target:
-            try:
-                if datetime.fromisoformat(target).astimezone(tz).date() == today_date:
-                    selected.append(task)
-            except Exception:
-                pass
+        if not target:
+            continue
+        try:
+            target_date = datetime.fromisoformat(target).astimezone(tz).date()
+            if target_date == today_date:
+                selected.append(task)
+            elif target_date < today_date:
+                overdue.append(task)
+        except Exception:
+            pass
+
     selected.sort(key=lambda t: t.scheduled_at or t.due_at or "")
+    overdue.sort(key=lambda t: t.scheduled_at or t.due_at or "")
     today_label = jalali_date(today_gregorian())
-    if not selected:
-        _set_task_scope(user.id, [], "today")
+
+    visible = (selected + overdue)[:30]
+    _set_task_scope(user.id, [task.id for task in visible], "today")
+
+    if not selected and not overdue:
         await update.effective_message.reply_text(f"برای امروز {today_label} چیزی ثبت نکردی.")
         return
-    _set_task_scope(user.id, [task.id for task in selected[:30]], "today")
-    await update.effective_message.reply_text(f"کارای امروزت، {today_label} 👇")
-    for task in selected[:30]:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ انجامش دادم", callback_data=f"done|{task.id}")]])
-        when = local_datetime(task.scheduled_at or task.due_at)
-        await update.effective_message.reply_text(f"• {task.title}\n🗓 {when}", reply_markup=kb)
+
+    if selected:
+        await update.effective_message.reply_text(f"کارای امروزت، {today_label} 👇")
+        for task in selected[:30]:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ انجامش دادم", callback_data=f"done|{task.id}")]])
+            when = local_datetime(task.scheduled_at or task.due_at)
+            await update.effective_message.reply_text(f"• {task.title}\n🗓 {when}", reply_markup=kb)
+
+    if overdue:
+        if selected:
+            intro = f"راستی {fa_num(len(overdue))} کار عقب‌افتاده هم داری 👇"
+        else:
+            intro = (
+                f"برای امروز چیزی زمان‌بندی نشده، ولی {fa_num(len(overdue))} کار از قبل مونده 👇"
+            )
+        lines = [intro, ""]
+        for task in overdue[:20]:
+            lines.append(f"• {task.title} · قبلاً {local_datetime(task.scheduled_at or task.due_at)}")
+        lines.extend(["", "اگه خواستی فقط بگو «اینا رو بیار امروز» یا «اینا رو برای فردا بچین»."])
+        await update.effective_message.reply_text("\n".join(lines))
 
 
 async def upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
