@@ -450,11 +450,13 @@ async def _run_planning_agent(
 
     tasks = _agent_open_tasks(user.id)
     try:
+        focus_task_ids = _get_task_scope(user.id) if _looks_like_scope_reference(text) else []
         result = await ai.planning_agent(
             text,
             tasks,
             IRAN_TZ,
             current_draft=current_draft,
+            focus_task_ids=focus_task_ids,
         )
         _charge_usage(user.id, voice_seconds)
     except Exception as exc:
@@ -1699,6 +1701,11 @@ async def route_text(
         if handled:
             return
 
+    scoped_preview = _scope_reschedule_preview(user.id, text)
+    if scoped_preview is not None:
+        await _save_agent_preview(update, user, text, scoped_preview)
+        return
+
     handled_by_agent = await _run_planning_agent(
         update,
         user,
@@ -2124,8 +2131,10 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     selected.sort(key=lambda t: t.scheduled_at or t.due_at or "")
     today_label = jalali_date(today_gregorian())
     if not selected:
+        _set_task_scope(user.id, [], "today")
         await update.effective_message.reply_text(f"برای امروز {today_label} چیزی ثبت نکردی.")
         return
+    _set_task_scope(user.id, [task.id for task in selected[:30]], "today")
     await update.effective_message.reply_text(f"کارای امروزت، {today_label} 👇")
     for task in selected[:30]:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ انجامش دادم", callback_data=f"done|{task.id}")]])
@@ -2141,8 +2150,10 @@ async def upcoming(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             .order_by(Task.scheduled_at.asc(), Task.due_at.asc())
         ).all()
     if not tasks:
+        _set_task_scope(user.id, [], "upcoming")
         await update.effective_message.reply_text("فعلاً کار باز ثبت‌شده‌ای نداری.")
         return
+    _set_task_scope(user.id, [task.id for task in tasks[:30]], "upcoming")
     lines = ["کارای بازت ایناست 👇"]
     for task in tasks[:30]:
         line = f"• {task.title}"
