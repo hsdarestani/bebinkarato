@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.ai import CloudflareAI
-from app.bot import _simple_replacement, _simple_delete_index, _deadline_was_explicit
+from app.bot import _simple_replacement, _simple_delete_index, _deadline_was_explicit, _reply_means_completed, _reply_task_title
 
 
 async def main() -> None:
@@ -16,6 +16,11 @@ async def main() -> None:
     assert _simple_delete_index("دومی رو حذف کن") == 1
     assert not _deadline_was_explicit("امروز چند تا کار دارم انجام بدم")
     assert _deadline_was_explicit("این کار باید تا فردا تموم بشه")
+    assert _reply_means_completed("اینو انجام دادم")
+    assert _reply_means_completed("تموم شد")
+    assert not _reply_means_completed("فردا انجامش میدم")
+    assert _reply_task_title("⏰ خرید غذا و تشویقی سرمه") == "خرید غذا و تشویقی سرمه"
+    assert _reply_task_title("• جلسه ریشه\n🗓 ۱۴۰۵/۰۷/۰۶ ساعت ۱۵:۳۰") == "جلسه ریشه"
 
     prepared = CloudflareAI._prepare_daily_brain_dump(
         [
