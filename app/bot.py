@@ -186,7 +186,8 @@ def _target_gregorian_date_from_text(text: str) -> str | None:
 
     short = re.search(r"(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})(?!\d)", raw)
     if short:
-        month, day = map(int, short.groups())
+        # در گفتار فارسی «۵/۷» یعنی روز ۵ از ماه ۷.
+        day, month = map(int, short.groups())
         try:
             current_j = jdatetime.date.fromgregorian(date=today)
             return jdatetime.date(current_j.year, month, day).togregorian().isoformat()
