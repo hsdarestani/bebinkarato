@@ -15,7 +15,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from app.ai import AIError, CloudflareAI
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import AgentDraft, PendingAction, ReportAttachment, Task, User, WorkReport, utc_now_iso
+from app.models import AgentDraft, PendingAction, ReportAttachment, Task, TaskViewContext, User, WorkReport, utc_now_iso
 
 settings = get_settings()
 ai = CloudflareAI()
@@ -132,6 +132,114 @@ def _clear_pending(user_id: int) -> None:
         if item:
             db.delete(item)
             db.commit()
+
+
+def _set_task_scope(user_id: int, task_ids: list[int], view_name: str) -> None:
+    ids = [int(x) for x in task_ids[:50]]
+    with SessionLocal() as db:
+        item = db.scalar(select(TaskViewContext).where(TaskViewContext.user_id == user_id))
+        if item is None:
+            item = TaskViewContext(
+                user_id=user_id,
+                task_ids_json=json.dumps(ids),
+                view_name=view_name,
+            )
+            db.add(item)
+        else:
+            item.task_ids_json = json.dumps(ids)
+            item.view_name = view_name
+            item.updated_at = utc_now_iso()
+        db.commit()
+
+
+def _get_task_scope(user_id: int, max_age_hours: int = 12) -> list[int]:
+    with SessionLocal() as db:
+        item = db.scalar(select(TaskViewContext).where(TaskViewContext.user_id == user_id))
+        if not item:
+            return []
+        try:
+            updated = datetime.fromisoformat(item.updated_at.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - updated.astimezone(timezone.utc) > timedelta(hours=max_age_hours):
+                return []
+            values = json.loads(item.task_ids_json or "[]")
+            return [int(x) for x in values if str(x).isdigit()]
+        except Exception:
+            return []
+
+
+def _looks_like_scope_reference(text: str) -> bool:
+    n = _normalize_fa(text)
+    return bool(re.search(
+        r"(اینا|اینها|این\s+کارا|این\s+کارها|همینا|همینها|همین\s+کارا|"
+        r"اونا|اونها|اون\s+کارا|اون\s+کارها|همونا|همونها|همه\s*شون|"
+        r"اون\s+(?:دو|سه|چهار|چند)\s*تا)",
+        n,
+    ))
+
+
+def _scope_reschedule_preview(user_id: int, text: str) -> dict | None:
+    if not _looks_like_scope_reference(text):
+        return None
+
+    n = _normalize_fa(text)
+    if not re.search(r"(بذار|بزار|ببر|بنداز|منتقل|باشه|بمونه|بماند)", n):
+        return None
+
+    day_offset = None
+    if "پس فردا" in n:
+        day_offset = 2
+    elif "فردا" in n:
+        day_offset = 1
+    elif "امروز" in n:
+        day_offset = 0
+    if day_offset is None:
+        return None
+
+    scope_ids = _get_task_scope(user_id)
+    if not scope_ids:
+        return None
+
+    tz = ZoneInfo(IRAN_TZ)
+    target_date = datetime.now(tz).date() + timedelta(days=day_offset)
+
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.id.in_(scope_ids),
+                Task.status.in_(["todo", "doing"]),
+            )
+        ).all()
+        by_id = {task.id: task for task in tasks}
+
+    operations = []
+    cursor = datetime.combine(target_date, datetime.min.time(), tzinfo=tz).replace(hour=9)
+    for task_id in scope_ids:
+        task = by_id.get(task_id)
+        if not task:
+            continue
+        target = None
+        if task.scheduled_at:
+            try:
+                old = datetime.fromisoformat(task.scheduled_at.replace("Z", "+00:00")).astimezone(tz)
+                target = datetime.combine(target_date, old.timetz().replace(tzinfo=None), tzinfo=tz)
+            except Exception:
+                target = None
+        if target is None:
+            target = cursor
+            cursor = cursor + timedelta(minutes=max(30, int(task.estimated_minutes or 30)))
+
+        operations.append({
+            "type": "update",
+            "task_id": task.id,
+            "changes": {
+                "scheduled_at": target.astimezone(timezone.utc).isoformat(),
+            },
+        })
+
+    if not operations:
+        return None
+    return {"mode": "mutate", "operations": operations}
 
 
 def _default_reminder(scheduled_at: str | None, due_at: str | None) -> str | None:
