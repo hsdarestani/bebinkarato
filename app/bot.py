@@ -167,6 +167,78 @@ def _get_task_scope(user_id: int, max_age_hours: int = 12) -> list[int]:
             return []
 
 
+def _target_gregorian_date_from_text(text: str) -> str | None:
+    raw = (text or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+    normalized = _normalize_fa(raw)
+    tz = ZoneInfo(IRAN_TZ)
+    today = datetime.now(tz).date()
+
+    # تاریخ صریح از عبارت‌های نسبی معتبرتر است.
+    full = re.search(r"(?<!\d)(\d{4})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{1,2})(?!\d)", raw)
+    if full:
+        year, month, day = map(int, full.groups())
+        try:
+            if year < 1700:
+                return jdatetime.date(year, month, day).togregorian().isoformat()
+            return datetime(year, month, day).date().isoformat()
+        except Exception:
+            return None
+
+    short = re.search(r"(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})(?!\d)", raw)
+    if short:
+        month, day = map(int, short.groups())
+        try:
+            current_j = jdatetime.date.fromgregorian(date=today)
+            return jdatetime.date(current_j.year, month, day).togregorian().isoformat()
+        except Exception:
+            return None
+
+    if "پس فردا" in normalized:
+        return (today + timedelta(days=2)).isoformat()
+    if "دیروز" in normalized:
+        return (today - timedelta(days=1)).isoformat()
+    if "فردا" in normalized:
+        return (today + timedelta(days=1)).isoformat()
+    if "امروز" in normalized:
+        return today.isoformat()
+    return None
+
+
+def _is_delete_request(text: str) -> bool:
+    n = _normalize_fa(text)
+    return bool(re.search(r"(حذف|پاک|بردار|بنداز\s+دور|بیخیال)", n))
+
+
+def _task_target_date(task: Task) -> str | None:
+    raw = task.scheduled_at or task.due_at
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(ZoneInfo(IRAN_TZ)).date().isoformat()
+    except Exception:
+        return None
+
+
+def _date_scoped_delete_payload(user_id: int, target_date: str) -> dict:
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(Task)
+            .where(Task.user_id == user_id, Task.status.in_(["todo", "doing"]))
+            .order_by(Task.scheduled_at.asc(), Task.due_at.asc(), Task.id.asc())
+        ).all()
+        ids = [task.id for task in tasks if _task_target_date(task) == target_date]
+
+    return {
+        "mode": "mutate",
+        "operations": [{"type": "delete", "task_id": task_id} for task_id in ids],
+    }
+
+
+def _draft_is_delete_only(payload: dict) -> bool:
+    operations = payload.get("operations") or []
+    return bool(operations) and all(op.get("type") == "delete" for op in operations)
+
+
 def _looks_like_scope_reference(text: str) -> bool:
     n = _normalize_fa(text)
     return bool(re.search(
@@ -540,6 +612,34 @@ async def _revise_agent_preview(
         except Exception:
             current = {}
         original = draft.source_text
+
+    target_date = _target_gregorian_date_from_text(text)
+    if target_date and _draft_is_delete_only(current):
+        revised = _date_scoped_delete_payload(user.id, target_date)
+        if not revised.get("operations"):
+            with SessionLocal() as db:
+                draft = db.get(AgentDraft, draft_id)
+                if draft and draft.user_id == user.id:
+                    draft.status = "discarded"
+                    draft.updated_at = utc_now_iso()
+                    db.commit()
+            _clear_pending(user.id)
+            await update.effective_message.reply_text(
+                f"برای {jalali_date(target_date)} هیچ کار باز زمان‌بندی‌شده‌ای پیدا نکردم؛ چیزی رو حذف نکردم."
+            )
+            return True
+
+        await update.effective_message.reply_text(
+            f"اوکی، حذف رو فقط محدود کردم به {jalali_date(target_date)} 👇"
+        )
+        await _save_agent_preview(
+            update,
+            user,
+            original,
+            revised,
+            existing_draft_id=draft_id,
+        )
+        return True
 
     if not _quota_ok(user, voice_seconds):
         await update.effective_message.reply_text("سهمیه هوش مصنوعی این ماهت پر شده 😅")
@@ -1868,6 +1968,20 @@ async def route_text(
             handled = await _handle_edit_text(update, user, text, pending)
         if handled:
             return
+
+    target_delete_date = _target_gregorian_date_from_text(text)
+    if target_delete_date and _is_delete_request(text):
+        delete_preview = _date_scoped_delete_payload(user.id, target_delete_date)
+        if delete_preview.get("operations"):
+            await update.effective_message.reply_text(
+                f"فهمیدم؛ فقط کارهای {jalali_date(target_delete_date)} رو برای حذف در نظر گرفتم 👇"
+            )
+            await _save_agent_preview(update, user, text, delete_preview)
+        else:
+            await update.effective_message.reply_text(
+                f"برای {jalali_date(target_delete_date)} هیچ کار باز زمان‌بندی‌شده‌ای پیدا نکردم."
+            )
+        return
 
     scoped_preview = _scope_reschedule_preview(user.id, text)
     if scoped_preview is not None:
