@@ -490,6 +490,31 @@ async def _run_planning_agent(
     return False
 
 
+async def _fallback_agent_plan(
+    update: Update,
+    user: User,
+    text: str,
+    voice_seconds: int = 0,
+) -> bool:
+    if not _quota_ok(user, voice_seconds):
+        return False
+    try:
+        parsed = await ai.parse_tasks(text, IRAN_TZ, "fa")
+        _charge_usage(user.id, voice_seconds)
+    except Exception as exc:
+        print(f"Fallback planning parse error: {exc}")
+        return False
+
+    if not parsed:
+        return False
+
+    operations = [{"type": "create", "task": item} for item in parsed]
+    operations = ai._prepare_daily_brain_dump(operations, text, IRAN_TZ)
+    payload = {"mode": "mutate", "operations": operations}
+    await _save_agent_preview(update, user, text, payload)
+    return True
+
+
 async def _revise_agent_preview(
     update: Update,
     user: User,
@@ -1741,7 +1766,16 @@ async def route_text(
         if not matched_existing:
             await _create_report_preview(update, context, user, text, source, voice_seconds)
     elif intent == "plan":
-        await _create_task_preview(update, user, text, voice_seconds)
+        planned = await _fallback_agent_plan(
+            update,
+            user,
+            text,
+            voice_seconds=voice_seconds,
+        )
+        if not planned:
+            await update.effective_message.reply_text(
+                "فهمیدم داری برنامه می‌دی، ولی این بار نتونستم برنامه‌ی مطمئنی ازش بسازم. همون متن یا ویس رو دوباره بفرست."
+            )
     else:
         await update.effective_message.reply_text(
             "دقیق نفهمیدم چی می‌خوای 😄 عادی بگو؛ مثلاً بگو چه کاری داری، چی انجام دادی، یا بپرس امروز چی داری."
