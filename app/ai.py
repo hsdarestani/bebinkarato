@@ -2,7 +2,7 @@ import ast
 import base64
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -53,6 +53,7 @@ class CloudflareAI:
                                 "task": {
                                     "type": "object",
                                     "properties": task_fields,
+                                    "required": list(task_fields.keys()),
                                 },
                                 "changes": {
                                     "type": "object",
@@ -257,6 +258,14 @@ unknown = واقعاً قابل فهم نیست
 18. اگر focus_task_ids داده شده و کاربر با عباراتی مثل «اینا»، «همینا»، «اون کارا»، «اون دوتا/سه‌تا» اشاره می‌کند، منظور دقیقاً همان Taskهاست.
 19. در حالت 18 حق نداری از «فردا»، «امروز» یا عبارت اشاره‌ای یک Task جدید بسازی. باید روی همان Taskهای موجود update/delete/complete انجام بدهی، مگر کاربر صریحاً بگوید یک کار جدید اضافه کن.
 20. اگر کاربر گفت «اینا باشه برای فردا»، scheduled_at همان Taskها را به فردا منتقل کن و ساعت قبلی هر Task را تا حد ممکن حفظ کن. due_at را تغییر نده مگر کاربر صریحاً از ددلاین حرف زده باشد.
+21. اگر کاربر چند کار را پشت سر هم یا خط‌به‌خط فرستاد، حتی اگر نگفت «برنامه‌ریزی کن»، آن را brain dump برنامه روزانه بدان و mode=mutate بده.
+22. در brain dump چندکاری، فقط لیست Task نساز؛ برای هر کار estimated_minutes واقع‌بینانه تخمین بزن و scheduled_at منطقی بچین.
+23. همه کارها را ۳۰ دقیقه فرض نکن. کار خیلی کوتاه می‌تواند ۱۰ تا ۲۰ دقیقه، خرید/رفت‌وآمد معمولاً ۳۰ تا ۶۰ دقیقه، جلسه معمولاً ۴۵ تا ۶۰ دقیقه و کار عمیق فنی معمولاً ۶۰ تا ۱۲۰ دقیقه یا بیشتر باشد. بر اساس معنای خود کار تخمین بزن.
+24. اگر کاربر ساعت صریح گفته، مثل «جلسه ریشه ساعت ۱۵:۳۰»، همان ساعت fixed است. عبارت ساعت را داخل title نگه ندار؛ title فقط «جلسه ریشه» باشد و scheduled_at روی ۱۵:۳۰ تنظیم شود.
+25. برای brain dump امروز، برنامه را از بعدِ now بچین، نه از ساعت گذشته. شروع پیشنهادی را به نزدیک‌ترین بازه ۱۵ دقیقه‌ای بعد از now گرد کن.
+26. کارهای بدون ساعت را دور قرارهای fixed بچین و overlap نساز. اگر همه کارها واقع‌بینانه تا آخر روز جا نمی‌شوند، کارهای کم‌اولویت‌تر را به فردا منتقل کن؛ روز را غیرواقعی فشرده نکن.
+27. اگر کاربر روز دیگری مثل «فردا» را صریح نگفته، brain dump چندکاری را برنامه امروز فرض کن.
+28. ترتیب خام پیام کاربر الزاماً اولویت نیست؛ زمان ثابت، فوریت، وابستگی و منطق اجرا را در چیدمان لحاظ کن.
 
 Schema:
 {
@@ -401,6 +410,11 @@ Schema:
 
         if mode == "mutate":
             operations = self._deconflict_agent_schedule(operations)
+            operations = self._prepare_daily_brain_dump(
+                operations,
+                text,
+                timezone_name,
+            )
 
         return {"mode": mode, "operations": operations}
 
@@ -551,6 +565,151 @@ Schema:
         if not changed:
             return None
         return {"mode": "mutate", "operations": operations}
+
+    @staticmethod
+    def _ceil_quarter(dt: datetime) -> datetime:
+        dt = dt.replace(second=0, microsecond=0)
+        remainder = dt.minute % 15
+        if remainder:
+            dt += timedelta(minutes=15 - remainder)
+        return dt
+
+    @staticmethod
+    def _strip_clock_from_title(title: str) -> str:
+        value = str(title or "").strip()
+        fa_to_en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+        normalized = value.translate(fa_to_en)
+        patterns = [
+            r"\s*(?:،|,|-)?\s*ساعت\s*\d{1,2}(?::\d{1,2})?\s*(?:صبح|ظهر|عصر|شب)?\s*$",
+            r"\s*(?:،|,|-)?\s*\d{1,2}:\d{2}\s*$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.I)
+            if match:
+                cut = match.start()
+                return value[:cut].strip(" ،,-")
+        return value
+
+    @classmethod
+    def _clock_in_text(cls, value: str) -> tuple[int, int] | None:
+        text = str(value or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+        match = re.search(
+            r"(?:ساعت\s*)?(\d{1,2})(?::(\d{1,2}))\s*(صبح|ظهر|عصر|شب)?",
+            text,
+            flags=re.I,
+        )
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        part = match.group(3) or ""
+        if hour > 23 or minute > 59:
+            return None
+        if part in {"عصر", "شب"} and 1 <= hour < 12:
+            hour += 12
+        elif part == "ظهر" and 1 <= hour < 12:
+            hour += 12
+        elif part == "صبح" and hour == 12:
+            hour = 0
+        return hour, minute
+
+    @classmethod
+    def _prepare_daily_brain_dump(
+        cls,
+        operations: list[dict],
+        source_text: str,
+        timezone_name: str,
+    ) -> list[dict]:
+        creates = [op for op in operations if op.get("type") == "create" and isinstance(op.get("task"), dict)]
+        if len(creates) < 2:
+            return operations
+
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("Asia/Tehran")
+        now = datetime.now(tz)
+        source_norm = str(source_text or "").replace("ي", "ی").replace("ك", "ک")
+        if "پس فردا" in source_norm:
+            base_date = (now + timedelta(days=2)).date()
+        elif "فردا" in source_norm:
+            base_date = (now + timedelta(days=1)).date()
+        else:
+            base_date = now.date()
+
+        # First clean titles and recover explicit clocks if model left them embedded in titles.
+        fixed = []
+        unscheduled = []
+        for op in creates:
+            task = op["task"]
+            raw_title = str(task.get("title") or "")
+            clock = cls._clock_in_text(raw_title)
+            if clock and not task.get("scheduled_at"):
+                hour, minute = clock
+                target = datetime.combine(base_date, datetime.min.time(), tzinfo=tz).replace(hour=hour, minute=minute)
+                if base_date == now.date() and target < now:
+                    # Explicit past time stays semantically fixed; don't silently move it.
+                    pass
+                task["scheduled_at"] = target.astimezone(timezone.utc).isoformat()
+            task["title"] = cls._strip_clock_from_title(raw_title)
+
+            if task.get("scheduled_at"):
+                try:
+                    start = datetime.fromisoformat(str(task["scheduled_at"]).replace("Z", "+00:00")).astimezone(tz)
+                    fixed.append((start, op))
+                    continue
+                except Exception:
+                    task["scheduled_at"] = None
+            unscheduled.append(op)
+
+        fixed.sort(key=lambda x: x[0])
+
+        # If model already scheduled every item with distinct sensible starts, preserve it.
+        if not unscheduled:
+            starts = []
+            for _, op in fixed:
+                try:
+                    starts.append(datetime.fromisoformat(op["task"]["scheduled_at"].replace("Z", "+00:00")).astimezone(tz))
+                except Exception:
+                    pass
+            if len({x.replace(second=0, microsecond=0) for x in starts}) == len(starts):
+                return operations
+
+        cursor = datetime.combine(base_date, datetime.min.time(), tzinfo=tz).replace(hour=9)
+        if base_date == now.date():
+            cursor = cls._ceil_quarter(now + timedelta(minutes=5))
+
+        # Treat fixed items as blocked intervals.
+        blocked = []
+        for start, op in fixed:
+            duration = max(10, int((op.get("task") or {}).get("estimated_minutes") or 30))
+            blocked.append((start, start + timedelta(minutes=duration)))
+        blocked.sort(key=lambda x: x[0])
+
+        for op in unscheduled:
+            task = op["task"]
+            duration = max(10, int(task.get("estimated_minutes") or 30))
+            while True:
+                collision = None
+                end = cursor + timedelta(minutes=duration)
+                for b_start, b_end in blocked:
+                    if cursor < b_end and end > b_start:
+                        collision = (b_start, b_end)
+                        break
+                if collision:
+                    cursor = cls._ceil_quarter(collision[1])
+                    continue
+                break
+
+            # Don't create an absurdly packed day. Carry overflow to tomorrow morning.
+            if cursor.hour >= 23 or (cursor + timedelta(minutes=duration)).date() > cursor.date():
+                base_date = cursor.date() + timedelta(days=1)
+                cursor = datetime.combine(base_date, datetime.min.time(), tzinfo=tz).replace(hour=9)
+
+            task["scheduled_at"] = cursor.astimezone(timezone.utc).isoformat()
+            cursor = cls._ceil_quarter(cursor + timedelta(minutes=duration) + timedelta(minutes=10))
+
+        return operations
 
     async def revise_planning_draft(
         self,
