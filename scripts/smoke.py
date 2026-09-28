@@ -1,4 +1,5 @@
 import asyncio
+import jdatetime
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,7 +8,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.ai import CloudflareAI
-from app.bot import _simple_replacement, _simple_delete_index, _deadline_was_explicit, _reply_means_completed, _reply_task_title, _target_gregorian_date_from_text, _draft_is_delete_only
+from app.bot import _simple_replacement, _simple_delete_index, _deadline_was_explicit, _reply_means_completed, _reply_task_title, _target_gregorian_date_from_text, _target_gregorian_date_from_text, _draft_is_delete_only
 
 
 async def main() -> None:
@@ -21,6 +22,13 @@ async def main() -> None:
     assert not _reply_means_completed("فردا انجامش میدم")
     assert _reply_task_title("⏰ خرید غذا و تشویقی سرمه") == "خرید غذا و تشویقی سرمه"
     assert _reply_task_title("• جلسه ریشه\n🗓 ۱۴۰۵/۰۷/۰۶ ساعت ۱۵:۳۰") == "جلسه ریشه"
+
+    iran_today = datetime.now(ZoneInfo("Asia/Tehran")).date()
+    current_j = jdatetime.date.fromgregorian(date=iran_today)
+    expected_7_5 = jdatetime.date(current_j.year, 7, 5).togregorian().isoformat()
+    assert _target_gregorian_date_from_text("فقط برای تاریخ ۵/۷") == expected_7_5
+    from datetime import timedelta as _td
+    assert _target_gregorian_date_from_text("کارای دیروز") == (iran_today - _td(days=1)).isoformat()
     iran_today = datetime.now(ZoneInfo("Asia/Tehran")).date()
     assert _target_gregorian_date_from_text("فقط کارای دیروز رو حذف کن") == (iran_today - timedelta(days=1)).isoformat()
     explicit = _target_gregorian_date_from_text("نه فقط برای تاریخ ۷/۵")
