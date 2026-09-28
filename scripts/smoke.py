@@ -17,6 +17,23 @@ async def main() -> None:
     assert not _deadline_was_explicit("امروز چند تا کار دارم انجام بدم")
     assert _deadline_was_explicit("این کار باید تا فردا تموم بشه")
 
+    prepared = CloudflareAI._prepare_daily_brain_dump(
+        [
+            {"type": "create", "task": {"title": "خرید غذا و تشویقی", "notes": "", "project": "", "priority": "medium", "estimated_minutes": 45, "due_at": None, "due_source": "none", "scheduled_at": None, "reminder_at": None}},
+            {"type": "create", "task": {"title": "بسته بندی چای", "notes": "", "project": "", "priority": "medium", "estimated_minutes": 25, "due_at": None, "due_source": "none", "scheduled_at": None, "reminder_at": None}},
+            {"type": "create", "task": {"title": "جلسه ریشه ساعت 15:30", "notes": "", "project": "", "priority": "high", "estimated_minutes": 60, "due_at": None, "due_source": "none", "scheduled_at": None, "reminder_at": None}},
+            {"type": "create", "task": {"title": "آماده کردن ساختار replication اپلیکیشن سولوشن", "notes": "", "project": "", "priority": "high", "estimated_minutes": 120, "due_at": None, "due_source": "none", "scheduled_at": None, "reminder_at": None}},
+        ],
+        "خرید غذا و تشویقی\nبسته بندی چای\nجلسه ریشه ساعت 15:30\nآماده کردن ساختار replication اپلیکیشن سولوشن",
+        "Asia/Tehran",
+    )
+    assert prepared[2]["task"]["title"] == "جلسه ریشه"
+    meeting_dt = datetime.fromisoformat(prepared[2]["task"]["scheduled_at"]).astimezone(ZoneInfo("Asia/Tehran"))
+    assert (meeting_dt.hour, meeting_dt.minute) == (15, 30)
+    prepared_starts = [op["task"]["scheduled_at"] for op in prepared]
+    assert all(prepared_starts)
+    assert len(set(prepared_starts)) == len(prepared_starts)
+
     ai = CloudflareAI()
     try:
         await ai._resolve_account_id()
