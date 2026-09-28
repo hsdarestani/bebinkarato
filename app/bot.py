@@ -814,6 +814,146 @@ def _normalize_fa(text: str) -> str:
     return value
 
 
+def _reply_means_completed(text: str) -> bool:
+    n = _normalize_fa(text)
+    if re.search(r"(انجام\s+ندادم|نکردم|تموم\s+نشد|تمام\s+نشد|فردا|بعدا|بعداً|می\s*کنم|میخوام|می\s*خوام)", n):
+        return False
+    return bool(re.search(
+        r"(انجام(?:ش)?\s+دادم|انجام\s+شد|تموم\s+شد|تمام\s+شد|"
+        r"کردمش|خریدم|رفتم|فرستادم|حلش\s+کردم|جمعش\s+کردم|زدمش)",
+        n,
+    ))
+
+
+def _reply_task_title(reply_text: str) -> str:
+    if not reply_text:
+        return ""
+    first = reply_text.strip().splitlines()[0].strip()
+    first = re.sub(r"^[\s•·▪️✅☑️⏰🔔📌🗓]+", "", first).strip()
+    return first
+
+
+def _find_open_task_from_reply(user_id: int, reply_text: str) -> Task | None:
+    candidate = _reply_task_title(reply_text)
+    if not candidate:
+        return None
+    candidate_norm = _normalize_fa(candidate)
+    if not candidate_norm:
+        return None
+
+    with SessionLocal() as db:
+        tasks = db.scalars(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.status.in_(["todo", "doing"]),
+            )
+        ).all()
+
+        exact = [task for task in tasks if _normalize_fa(task.title) == candidate_norm]
+        pool = exact
+        if not pool:
+            pool = [
+                task for task in tasks
+                if _texts_semantically_overlap(task.title, candidate)
+            ]
+        if not pool:
+            return None
+
+        now = datetime.now(timezone.utc)
+
+        def distance(task: Task) -> float:
+            raw = task.scheduled_at or task.reminder_at or task.due_at
+            if not raw:
+                return float("inf")
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+                return abs((dt - now).total_seconds())
+            except Exception:
+                return float("inf")
+
+        chosen = min(pool, key=distance)
+        db.expunge(chosen)
+        return chosen
+
+
+def _discard_pending_report_preview(user_id: int) -> None:
+    pending = _get_pending(user_id)
+    if not pending or pending[0] != "report_preview":
+        return
+    try:
+        report_id = int(pending[1])
+    except Exception:
+        _clear_pending(user_id)
+        return
+    with SessionLocal() as db:
+        report = db.get(WorkReport, report_id)
+        if report and report.user_id == user_id and report.status == "draft":
+            for att in list(report.attachments):
+                if att.local_path:
+                    try:
+                        Path(att.local_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            db.delete(report)
+            db.commit()
+    _clear_pending(user_id)
+
+
+async def _handle_reply_completion(update: Update, user: User, text: str) -> bool:
+    message = update.effective_message
+    if not message or not message.reply_to_message or not _reply_means_completed(text):
+        return False
+
+    replied = message.reply_to_message
+    if not replied.from_user or not replied.from_user.is_bot:
+        return False
+
+    reply_text = replied.text or replied.caption or ""
+    task = _find_open_task_from_reply(user.id, reply_text)
+    if not task:
+        return False
+
+    _discard_pending_report_preview(user.id)
+
+    with SessionLocal() as db:
+        current = db.get(Task, task.id)
+        if not current or current.user_id != user.id or current.status not in {"todo", "doing"}:
+            return False
+
+        current.status = "done"
+        current.reminder_sent = True
+        current.updated_at = utc_now_iso()
+
+        existing = db.scalar(
+            select(WorkReport).where(
+                WorkReport.user_id == user.id,
+                WorkReport.task_id == current.id,
+                WorkReport.status == "submitted",
+            )
+        )
+        if existing is None:
+            db.add(WorkReport(
+                user_id=user.id,
+                task_id=current.id,
+                title=current.title,
+                summary=current.notes or current.title,
+                project=current.project or "",
+                category="کار انجام‌شده",
+                duration_minutes=current.estimated_minutes,
+                work_date=today_gregorian(),
+                source="ریپلای به یادآوری",
+                original_text=text,
+                status="submitted",
+            ))
+        title = current.title
+        db.commit()
+
+    await message.reply_text(
+        f"اوکی 👌 «{title}» انجام‌شده ثبت شد و رفت تو گزارش امروز."
+    )
+    return True
+
+
 def _completion_refers_to_existing_tasks(text: str) -> bool:
     n = _normalize_fa(text)
     return bool(re.search(
@@ -1638,6 +1778,9 @@ async def route_text(
 ) -> None:
     user = _upsert_user(update)
     pending = _get_pending(user.id)
+
+    if await _handle_reply_completion(update, user, text):
+        return
 
     if pending and pending[0] == "agent_edit":
         handled = await _revise_agent_preview(
