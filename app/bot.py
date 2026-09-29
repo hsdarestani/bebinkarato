@@ -672,6 +672,92 @@ async def _revise_agent_preview(
     return True
 
 
+def _task_identity(title: str) -> str:
+    return _normalize_fa(title or "")
+
+
+def _iso_local_day(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(ZoneInfo(IRAN_TZ)).date().isoformat()
+    except Exception:
+        return None
+
+
+def _find_reusable_open_task(db, user_id: int, item: dict) -> Task | None:
+    title_key = _task_identity(str(item.get("title") or ""))
+    if not title_key:
+        return None
+
+    candidates = db.scalars(
+        select(Task).where(
+            Task.user_id == user_id,
+            Task.status.in_(["todo", "doing"]),
+        )
+    ).all()
+    candidates = [task for task in candidates if _task_identity(task.title) == title_key]
+    if not candidates:
+        return None
+
+    new_day = _iso_local_day(item.get("scheduled_at") or item.get("due_at"))
+    if new_day:
+        same_day = [
+            task for task in candidates
+            if _iso_local_day(task.scheduled_at or task.due_at) == new_day
+        ]
+        if same_day:
+            return max(same_day, key=lambda t: t.updated_at or t.created_at or "")
+        unscheduled = [
+            task for task in candidates
+            if _iso_local_day(task.scheduled_at or task.due_at) is None
+        ]
+        if unscheduled:
+            return max(unscheduled, key=lambda t: t.updated_at or t.created_at or "")
+        return None
+
+    # If the new mention has no day, prefer an already-open exact task instead of duplicating it.
+    return max(
+        candidates,
+        key=lambda t: (
+            1 if t.scheduled_at else 0,
+            t.updated_at or t.created_at or "",
+        ),
+    )
+
+
+def _delete_exact_open_duplicates(
+    db,
+    user_id: int,
+    title: str,
+    *,
+    exclude_id: int | None = None,
+    completion_day: str | None = None,
+) -> int:
+    key = _task_identity(title)
+    if not key:
+        return 0
+
+    tasks = db.scalars(
+        select(Task).where(
+            Task.user_id == user_id,
+            Task.status.in_(["todo", "doing"]),
+        )
+    ).all()
+    removed = 0
+    for duplicate in tasks:
+        if exclude_id is not None and duplicate.id == exclude_id:
+            continue
+        if _task_identity(duplicate.title) != key:
+            continue
+        duplicate_day = _iso_local_day(duplicate.scheduled_at or duplicate.due_at)
+        if completion_day is not None and duplicate_day not in {None, completion_day}:
+            continue
+        db.delete(duplicate)
+        removed += 1
+    return removed
+
+
 def _apply_agent_draft(user_id: int, draft_id: int) -> tuple[int, int, int, int]:
     created = updated = deleted = completed = 0
     with SessionLocal() as db:
@@ -691,6 +777,28 @@ def _apply_agent_draft(user_id: int, draft_id: int) -> tuple[int, int, int, int]
                 due_at = item.get("due_at") if item.get("due_source") == "explicit" else None
                 scheduled_at = item.get("scheduled_at")
                 reminder_at = item.get("reminder_at") or _default_reminder(scheduled_at, due_at)
+
+                reusable = _find_reusable_open_task(db, user_id, item)
+                if reusable is not None:
+                    reusable.title = str(item.get("title") or reusable.title)
+                    if item.get("notes"):
+                        reusable.notes = str(item.get("notes") or "")
+                    if item.get("project"):
+                        reusable.project = str(item.get("project") or "")
+                    reusable.priority = item.get("priority") if item.get("priority") in {"low","medium","high","urgent"} else reusable.priority
+                    reusable.estimated_minutes = int(item.get("estimated_minutes") or reusable.estimated_minutes or 30)
+                    if scheduled_at:
+                        reusable.scheduled_at = scheduled_at
+                    if due_at:
+                        reusable.due_at = due_at
+                        reusable.due_source = "explicit"
+                    reusable.reminder_at = reminder_at or _default_reminder(reusable.scheduled_at, reusable.due_at)
+                    reusable.reminder_sent = False
+                    reusable.original_text = draft.source_text
+                    reusable.updated_at = utc_now_iso()
+                    updated += 1
+                    continue
+
                 db.add(Task(
                     user_id=user_id,
                     batch_id=str(uuid4()),
@@ -724,6 +832,13 @@ def _apply_agent_draft(user_id: int, draft_id: int) -> tuple[int, int, int, int]
             elif kind == "complete":
                 task.status = "done"
                 task.updated_at = utc_now_iso()
+                _delete_exact_open_duplicates(
+                    db,
+                    user_id,
+                    task.title,
+                    exclude_id=task.id,
+                    completion_day=today_gregorian(),
+                )
                 existing = db.scalar(
                     select(WorkReport).where(
                         WorkReport.user_id == user_id,
