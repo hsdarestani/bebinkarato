@@ -1139,6 +1139,13 @@ async def _handle_reply_completion(update: Update, user: User, text: str) -> boo
         current.status = "done"
         current.reminder_sent = True
         current.updated_at = utc_now_iso()
+        _delete_exact_open_duplicates(
+            db,
+            user.id,
+            current.title,
+            exclude_id=current.id,
+            completion_day=today_gregorian(),
+        )
 
         existing = db.scalar(
             select(WorkReport).where(
