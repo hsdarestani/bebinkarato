@@ -68,9 +68,6 @@ jobs:
 
             docker compose up -d --build --remove-orphans
 
-            # ONE-TIME exact duplicate cleanup.
-            docker compose exec -T app python -m scripts.dedupe_tasks
-
             if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
               ufw allow 80/tcp >/dev/null
               ufw allow 443/tcp >/dev/null
