@@ -243,7 +243,9 @@ def _draft_is_delete_only(payload: dict) -> bool:
 def _looks_like_scope_reference(text: str) -> bool:
     n = _normalize_fa(text)
     return bool(re.search(
-        r"(اینا|اینها|این\s+کارا|این\s+کارها|همینا|همینها|همین\s+کارا|"
+        r"(اینو|همینو|این\s+رو|این\s+را|همین\s+رو|همین\s+را|"
+        r"اونو|همونو|اون\s+رو|اون\s+را|همون\s+رو|همون\s+را|"
+        r"اینا|اینها|این\s+کارا|این\s+کارها|همینا|همینها|همین\s+کارا|"
         r"اونا|اونها|اون\s+کارا|اون\s+کارها|همونا|همونها|همه\s*شون|"
         r"اون\s+(?:دو|سه|چهار|چند)\s*تا)",
         n,
@@ -1137,7 +1139,7 @@ def _discard_pending_report_preview(user_id: int) -> None:
 
 async def _handle_reply_completion(update: Update, user: User, text: str) -> bool:
     message = update.effective_message
-    if not message or not message.reply_to_message or not _reply_means_completed(text):
+    if not message or not message.reply_to_message:
         return False
 
     replied = message.reply_to_message
@@ -1148,6 +1150,35 @@ async def _handle_reply_completion(update: Update, user: User, text: str) -> boo
     task = _find_open_task_from_reply(user.id, reply_text)
     if not task:
         return False
+
+    # معنی جواب به خود Task را با AI می‌فهمیم، نه با چند کلمه از پیش تعریف‌شده.
+    # Regex قدیمی فقط fallback است تا اگر سرویس AI لحظه‌ای در دسترس نبود،
+    # جواب‌های خیلی واضح همچنان کار کنند.
+    completed = False
+    used_ai = False
+    if _quota_ok(user):
+        try:
+            completed = await ai.reply_confirms_completion(
+                reply_text=text,
+                task_title=task.title,
+                reminder_text=reply_text,
+            )
+            used_ai = True
+        except Exception as exc:
+            print(f"Reply completion AI error: {exc}")
+            completed = _reply_means_completed(text)
+    else:
+        completed = _reply_means_completed(text)
+
+    if not completed:
+        # اگر جواب درباره همین یادآوری بود ولی «انجام شد» نبود، این Task را
+        # context فعلی نگه می‌داریم تا جمله‌هایی مثل «اینو بنداز فردا» هم
+        # در مرحله بعد روی همین کار فهمیده شوند.
+        _set_task_scope(user.id, [task.id], "reply")
+        return False
+
+    if used_ai:
+        _charge_usage(user.id)
 
     _discard_pending_report_preview(user.id)
 
