@@ -192,6 +192,50 @@ Schema: {"intent":"plan|report|today|today_reports|upcoming|reports|unknown"}"""
         intent = str(obj.get("intent") or "unknown")
         return intent if intent in {"plan", "report", "today", "today_reports", "upcoming", "reports", "unknown"} else "unknown"
 
+    async def reply_confirms_completion(
+        self,
+        reply_text: str,
+        task_title: str,
+        reminder_text: str = "",
+    ) -> bool:
+        system = """تو باید معنی یک جواب کوتاه و محاوره‌ای کاربر به یادآوری یک کار را بفهمی.
+هدف فقط این است که مشخص کنی آیا کاربر می‌گوید آن کار واقعاً انجام شده/اتفاق افتاده است یا نه.
+
+خیلی مهم:
+- بر اساس معنی جمله تصمیم بگیر، نه لیست کلمات ثابت.
+- فارسی محاوره‌ای، شکسته، ضمیرها و عبارت‌های غیرمستقیم را بفهم.
+- اگر کاربر بگوید کاری را انجام داده، رفته، خریده، فرستاده، جمع کرده، تمام کرده، انجامش داده‌اند، برگزار شده، تیک خورده یا هر تعبیر هم‌معنی دیگری، completed=true.
+- متن را با عنوان خود کار تطبیق بده. مثلاً اگر کار «تئاتر بریم» باشد و کاربر جواب دهد «اینو رفتیم»، یعنی انجام شده.
+- اگر می‌گوید هنوز انجام نشده، نرسیده، کنسل شده، قرار است بعداً انجام شود، می‌خواهد زمانش را عوض کند، سؤال می‌پرسد یا معنی جواب مبهم است، completed=false.
+- حدس خوش‌بینانه نزن. فقط وقتی معنی انجام‌شدن روشن است true بده.
+- فقط JSON معتبر برگردان.
+
+Schema:
+{"completed":true|false}"""
+        result = await self._run(
+            settings.cloudflare_llm_model,
+            {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"عنوان کار: {task_title}\n"
+                            f"متن یادآوری: {reminder_text or task_title}\n"
+                            f"جواب کاربر: {reply_text}"
+                        ),
+                    },
+                ],
+                "temperature": 0,
+                "max_tokens": 60,
+            },
+        )
+        obj = self._extract_json(result.get("response") or result.get("text") or result)
+        value = obj.get("completed")
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() == "true"
+
     async def planning_agent(
         self,
         text: str,
