@@ -74,6 +74,10 @@ async def main() -> None:
         assert report.get("work_date")
         assert report.get("duration_minutes") == 120
 
+        assert await ai.reply_confirms_completion("اینو رفتیم", "تئاتر بریم", "⏰ تئاتر بریم")
+        assert await ai.reply_confirms_completion("جمع شد، بزن انجام شده", "جلسه کتابخوانی", "⏰ جلسه کتابخوانی")
+        assert not await ai.reply_confirms_completion("نرسیدیم بریم، بنداز فردا", "تئاتر بریم", "⏰ تئاتر بریم")
+
         assert await ai.classify_intent("رباته رو ساختم کامل", "Asia/Tehran") == "report"
         assert await ai.classify_intent("یه ربات باید بسازم فیچراشو درارم", "Asia/Tehran") == "plan"
         assert await ai.classify_intent("امروز چی دارم؟", "Asia/Tehran") == "today"
