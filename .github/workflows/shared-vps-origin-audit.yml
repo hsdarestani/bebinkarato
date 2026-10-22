@@ -1,0 +1,33 @@
+name: Read-only origin inventory for shared-VPS migration
+on:
+  push:
+    branches: [ops/shared-vps-source-audit-20261022]
+    paths: [.github/workflows/shared-vps-origin-audit.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  origin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect existing host (no writes)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HOST }}
+          username: root
+          port: 22
+          password: ${{ secrets.PASS }}
+          command_timeout: 3m
+          script: |
+            set -eu
+            echo "Host OS"; sed -n '1,4p' /etc/os-release
+            echo "Resources"; nproc; free -h; df -h /
+            echo "Container status, without environment variables"
+            docker ps --format '{{.Names}} | {{.Status}} | {{.Ports}}' 2>/dev/null || true
+            echo "Compose projects"; docker compose ls --format json 2>/dev/null || true
+            echo "Application paths"
+            for d in /opt/bebinkarato /opt/bebinkarato/app; do if test -d "$d"; then echo "$d present"; du -sh "$d" 2>/dev/null || true; else echo "$d absent"; fi; done
+            echo "Persistence presence (no credentials or DB content)"
+            for d in /opt/bebinkarato/app/data /opt/camcam/data /opt/beonmeet/recorder-accounts; do test ! -d "$d" || du -sh "$d" 2>/dev/null || true; done
+            if test -f /opt/bebinkarato/app/data/bebinkarato.db; then du -h /opt/bebinkarato/app/data/bebinkarato.db; fi
+            echo "Read-only origin audit completed"
