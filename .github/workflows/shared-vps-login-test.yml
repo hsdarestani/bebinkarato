@@ -1,0 +1,24 @@
+name: Verify shared VPS SSH using existing repository deploy credentials
+on:
+  push:
+    branches: [ops/shared-vps-source-audit-20261022]
+    paths: [.github/workflows/shared-vps-login-test.yml]
+permissions:
+  contents: read
+jobs:
+  connectivity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test only; no changes
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 143.20.60.195
+          port: 9011
+          username: root
+          password: ${{ secrets.PASS }}
+          command_timeout: 20s
+          timeout: 8s
+          script: |
+            set -eu
+            case " $(hostname -I) " in *" 143.20.60.195 "*) echo "TARGET_MATCHED" ;; *) exit 1 ;; esac
+            echo "SSH_AUTH_WITH_REPO_SECRETS_OK"
