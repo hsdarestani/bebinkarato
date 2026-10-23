@@ -1,0 +1,23 @@
+name: Shared VPS runtime credential presence only
+on:
+  push:
+    branches: [ops/shared-vps-source-audit-20261022]
+    paths: [.github/workflows/shared-vps-runtime-presence.yml]
+permissions:
+  contents: read
+jobs:
+  presence:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report names only
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os
+          for key in ["TELEGRAM_BOT_TOKEN","CLOUDFLARE_API_TOKEN","CLOUDFLARE_ACCOUNT_ID","ADMIN_PASSWORD"]:
+              print(key + ": " + ("PRESENT" if os.environ.get(key) else "NOT_CONFIGURED"))
+          PY
