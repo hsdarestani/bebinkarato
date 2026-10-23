@@ -1,0 +1,10 @@
+# Layer this over docker-compose.yml on the existing multi-app VPS.
+# Only the FastAPI container is started; host Nginx owns 80/443 and TLS.
+# Use: docker compose -f docker-compose.yml -f docker-compose.shared-vps.yml up -d --no-deps app
+services:
+  app:
+    ports:
+      - "127.0.0.1:8106:8000"
+  caddy:
+    profiles:
+      - standalone
