@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   connectivity:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Test only; no changes
         uses: appleboy/ssh-action@v1
@@ -22,3 +22,5 @@ jobs:
             set -eu
             case " $(hostname -I) " in *" 143.20.60.195 "*) echo "TARGET_MATCHED" ;; *) exit 1 ;; esac
             echo "SSH_AUTH_WITH_REPO_SECRETS_OK"
+
+# Verify rotated credentials before isolated activation.
