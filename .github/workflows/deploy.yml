@@ -44,11 +44,17 @@ jobs:
             previous_image=$(docker inspect -f '{{.Image}}' bebinkarato)
             git fetch origin main
             runtime_changed=$(git diff --name-only "$previous" origin/main -- app scripts Dockerfile requirements.txt | wc -l)
+            # The original staging override was intentionally untracked.
+            # Move it to a retained backup before tracking the reviewed override.
+            if ! git ls-files --error-unmatch docker-compose.shared-vps.yml >/dev/null 2>&1; then
+              mv docker-compose.shared-vps.yml ".compose.before-deploy-$stamp.yml"
+            fi
             git checkout --detach origin/main
             docker compose -p bebinkarato-shared -f docker-compose.yml -f docker-compose.shared-vps.yml config --quiet
             rollback() {
               echo "Deployment failed; restoring previous application image and source"
               git checkout --detach "$previous"
+              if [ -f ".compose.before-deploy-$stamp.yml" ]; then cp -p ".compose.before-deploy-$stamp.yml" docker-compose.shared-vps.yml; fi
               printf 'services:\n  app:\n    image: %s\n' "$previous_image" > .rollback-image.yml
               docker compose -p bebinkarato-shared -f docker-compose.yml -f docker-compose.shared-vps.yml -f .rollback-image.yml up -d --no-deps --no-build app
               rm -f .rollback-image.yml
